@@ -1,7 +1,4 @@
 ultralytics
 opencv-python
-mediapipe
-gradio
 numpy
-label-studio
 pillow

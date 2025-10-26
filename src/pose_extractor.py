@@ -1,8 +1,8 @@
 import os
 # os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-qq
 import cv2
 import time
+import torch
 from ultralytics import YOLO
 
 # Import module hỗ trợ
@@ -15,13 +15,57 @@ from form_rules import evaluate_squat, evaluate_pushup
 # ⚙️ Cấu hình
 # -----------------------------
 EXERCISE =  "squat" # hoặc "squat"
-VIDEO_PATH = "data/raw/squat_ok_01.mp4"  # hoặc 0 nếu dùng webcam
+VIDEO_REL = os.path.join("data", "raw", "squat_ok_01.mp4")
+# file data/ nằm bên trong src/, không phải ở project root -> không cần ".."
+VIDEO_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), VIDEO_REL))
+
+# Nếu không tìm thấy file thì thông báo rõ ràng và fallback sang webcam (0)
+if not os.path.exists(VIDEO_PATH):
+    print(f"❌ Video không tìm thấy tại: {VIDEO_PATH}")
+    print("➜ Đặt file vào data/raw/ hoặc đổi VIDEO_PATH. Tự động chuyển sang webcam (0).")
+    VIDEO_PATH = 0
+
+print(f"▶️ Sử dụng video/webcam: {VIDEO_PATH}")
+
 FONT_PATH = os.path.join(os.path.dirname(__file__), "..", "fonts", "Roboto.ttf")
 
+# Add/modify these configurations at the top
+BATCH_SIZE = 1
+IMG_SIZE = 640  # or 480 for faster processing
+DRAW_EVERY_N_FRAMES = 3  # Increase to 3 or 4 for higher FPS
+
+# Thêm cấu hình sau phần CONFIG
+CONF_THRESHOLD = 0.5     # Lọc bớt detection có độ tin cậy thấp
+
 # -----------------------------
-# 🚀 Khởi tạo model
+# 🚀 Khởi tạo model (với GPU nếu có)
 # -----------------------------
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+print(f"▶️ Device: {device}")
+
+# Debug CUDA status
+print("\n=== 🔍 GPU/CUDA Status ===")
+print(f"CUDA available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"Current device: {torch.cuda.current_device()}")
+    print(f"Device name: {torch.cuda.get_device_name()}")
+    print(f"Device memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+else:
+    print("⚠️ CUDA không khả dụng - model đang chạy trên CPU")
+print("=====================\n")
+
+# Tối ưu thêm cho CUDA
+if device.startswith("cuda"):
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+# Modify model initialization
 model = YOLO("yolo11n-pose.pt")
+model.conf = CONF_THRESHOLD
+model.to(device)
+
 cap = cv2.VideoCapture(VIDEO_PATH)
 
 if not cap.isOpened():
@@ -63,10 +107,21 @@ while True:
     if not ret:
         print("🎬 Hết video hoặc lỗi đọc frame.")
         break
+    frame = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
 
-    results = model(frame, verbose=False)
+    # Use model.predict instead of direct call for better GPU utilization
+    results = model.predict(frame, 
+                       verbose=False,
+                       conf=CONF_THRESHOLD,
+                       device=device,
+                       batch=BATCH_SIZE)
     res = results[0]
-    annotated = res.plot()
+    
+    # Chỉ vẽ annotation mỗi N frame
+    if frame_idx % DRAW_EVERY_N_FRAMES == 0:
+        annotated = res.plot()
+    else:
+        annotated = frame.copy()
 
     counter = 0
     stage = "up"
