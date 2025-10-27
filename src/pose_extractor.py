@@ -1,21 +1,27 @@
 import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import cv2
 import time
 import torch
 from ultralytics import YOLO
 
-# Import module hỗ trợ
+# -----------------------------
+# 📦 Import module hỗ trợ
+# -----------------------------
 from utils.draw_utils import draw_text_pil
 from utils.video_utils import setup_window, compute_fps
-from rep_counter import count_squat, count_pushup
-from form_rules import evaluate_squat, evaluate_pushup
+from rep_counter import (
+    count_squat, count_pushup, count_plank, count_situp
+)
+from form_rules import (
+    evaluate_squat, evaluate_pushup, evaluate_plank, evaluate_situp
+)
 
 # -----------------------------
 # ⚙️ Cấu hình
 # -----------------------------
-EXERCISE =  "squat" # hoặc "squat"
-VIDEO_REL = os.path.join("data", "raw", "squat_ok_01.mp4")
+EXERCISE =  "pushup" # hoặc "squat"
+VIDEO_REL = os.path.join("data", "raw", "pushup_ok_01.mp4")
+
 # file data/ nằm bên trong src/, không phải ở project root -> không cần ".."
 VIDEO_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), VIDEO_REL))
 
@@ -71,12 +77,11 @@ cap = cv2.VideoCapture(VIDEO_PATH)
 if not cap.isOpened():
     print("❌ Không thể mở video hoặc webcam:", VIDEO_PATH)
     exit()
-
-state = {"stage": "up", "counter": 0}
-prev_time = time.time()
-frame_idx = 0
 print("▶️ Bắt đầu. Nhấn 'q' để thoát.")
 
+# -----------------------------
+# 🧩 Đăng ký bài tập
+# -----------------------------
 exercise_registry = {
     "squat": {
         "counter_func": count_squat,
@@ -88,8 +93,20 @@ exercise_registry = {
         "form_func": evaluate_pushup,
         "state": {"stage": "up", "counter": 0, "prev_angle": 160, "direction": "up"},
     },
+    "plank": {
+        "counter_func": count_plank,
+        "form_func": evaluate_plank,
+        "state": {"good_time": 0, "bad_time": 0, "is_good": False},
+    },
+    "situp": {
+        "counter_func": count_situp,
+        "form_func": evaluate_situp,
+        "state": {"stage": "down", "counter": 0, "prev_angle": 140, "direction": "down"},
+    },
     # Thêm bài tập mới ở đây:
-    # "lunges": {"counter_func": count_lunges, "form_func": evaluate_lunges, "state": {...}}
+    # "situp": {"counter_func": count_situp,
+    #            "form_func": evaluate_situp,
+    #            "state": {...}},
 }
 
 if EXERCISE not in exercise_registry:
@@ -102,7 +119,11 @@ state = exercise_registry[EXERCISE]["state"]
 # -----------------------------
 # 🔁 Vòng lặp chính
 # -----------------------------
+prev_time = time.time()
+frame_idx = 0
+
 while True:
+
     ret, frame = cap.read()
     if not ret:
         print("🎬 Hết video hoặc lỗi đọc frame.")
@@ -134,22 +155,40 @@ while True:
 
         # Gọi hàm đếm và đánh giá form tương ứng bài tập
         counter, stage, angle = counter_func(kps, state)
-        form_score, feedback = form_func(kps, annotated, stage, counter)
+        form_score, feedback, tone = form_func(kps, annotated, stage, counter)
 
-    # FPS
+    # -----------------------------
+    # 🧮 Tính FPS
+    # -----------------------------
     fps, prev_time = compute_fps(prev_time)
 
     # -----------------------------
     # 🖼️ Overlay text
     # -----------------------------
-    form_color = (0, 255, 0) if "tốt" in feedback or "chuẩn" in feedback else (255, 255, 0) if "có thể" in feedback else (255, 80, 80)
-    lines = [
-        (f"Số lần: {counter}", (255, 215, 0)),
-        (f"Trạng thái: {stage}", (255, 255, 255)),
-        (f"Góc: {int(angle)}°", (144, 238, 144)),
-        (f"Đánh giá: {feedback}", form_color),
-        (f"FPS: {fps:.1f}", (200, 200, 200)),
-    ]
+    form_score, feedback, tone = form_func(kps, annotated, stage, counter)
+
+    form_color = {
+        "positive": (0, 255, 0),
+        "neutral": (255, 255, 0),
+        "negative": (255, 80, 80)
+    }.get(tone, (200, 200, 200))
+
+    if EXERCISE == "plank":
+        lines = [
+            (f"Thời gian giữ: {counter:.1f}s", (255, 215, 0)),
+            (f"Tư thế: {'Chuẩn' if state.get('is_good') else 'Chưa đúng'}", (255, 255, 255)),
+            (f"Góc: {int(angle)}°", (144, 238, 144)),
+            (f"Đánh giá: {feedback}", form_color),
+            (f"FPS: {fps:.1f}", (200, 200, 200)),
+        ]
+    else:
+        lines = [
+            (f"Số lần: {counter}", (255, 215, 0)),
+            (f"Trạng thái: {stage}", (255, 255, 255)),
+            (f"Góc: {int(angle)}°", (144, 238, 144)),
+            (f"Đánh giá: {feedback}", form_color),
+            (f"FPS: {fps:.1f}", (200, 200, 200)),
+        ]
 
     annotated = draw_text_pil(annotated, lines, font_path=FONT_PATH, font_scale=26, pos=(20, 20))
 
