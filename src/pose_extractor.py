@@ -19,19 +19,29 @@ from form_rules import (
 # -----------------------------
 # ⚙️ Cấu hình
 # -----------------------------
-EXERCISE =  "pushup" # hoặc "squat"
-VIDEO_REL = os.path.join("data", "raw", "pushup_ok_01.mp4")
+EXERCISE =  "pushup"  # hoặc "squat", "plank", "situp"
 
+# Chọn nguồn vào: webcam hay video
+USE_WEBCAM = True      # Đổi True/False để chọn nguồn
+WEBCAM_INDEX = 0       # Chỉ số webcam (mặc định 0)
+
+# Đường dẫn video dùng khi USE_WEBCAM = False
+VIDEO_REL = os.path.join("data", "raw", "pushup_ok_01.mp4")
 # file data/ nằm bên trong src/, không phải ở project root -> không cần ".."
 VIDEO_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), VIDEO_REL))
 
-# Nếu không tìm thấy file thì thông báo rõ ràng và fallback sang webcam (0)
-if not os.path.exists(VIDEO_PATH):
-    print(f"❌ Video không tìm thấy tại: {VIDEO_PATH}")
-    print("➜ Đặt file vào data/raw/ hoặc đổi VIDEO_PATH. Tự động chuyển sang webcam (0).")
-    VIDEO_PATH = 0
-
-print(f"▶️ Sử dụng video/webcam: {VIDEO_PATH}")
+# Xác định nguồn cho VideoCapture
+if USE_WEBCAM:
+    CAP_SOURCE = WEBCAM_INDEX
+    print(f"▶️ Nguồn: Webcam({WEBCAM_INDEX})")
+else:
+    if not os.path.exists(VIDEO_PATH):
+        print(f"❌ Video không tìm thấy tại: {VIDEO_PATH}")
+        print(f"➜ Tự động chuyển sang webcam ({WEBCAM_INDEX}).")
+        CAP_SOURCE = WEBCAM_INDEX
+    else:
+        CAP_SOURCE = VIDEO_PATH
+        print(f"▶️ Nguồn: Video → {VIDEO_PATH}")
 
 FONT_PATH = os.path.join(os.path.dirname(__file__), "..", "fonts", "Roboto.ttf")
 
@@ -72,10 +82,10 @@ model = YOLO("yolo11n-pose.pt")
 model.conf = CONF_THRESHOLD
 model.to(device)
 
-cap = cv2.VideoCapture(VIDEO_PATH)
+cap = cv2.VideoCapture(CAP_SOURCE)
 
 if not cap.isOpened():
-    print("❌ Không thể mở video hoặc webcam:", VIDEO_PATH)
+    print("❌ Không thể mở nguồn capture:", CAP_SOURCE)
     exit()
 print("▶️ Bắt đầu. Nhấn 'q' để thoát.")
 
@@ -121,6 +131,7 @@ state = exercise_registry[EXERCISE]["state"]
 # -----------------------------
 prev_time = time.time()
 frame_idx = 0
+last_annotated = None  # cache frame có skeleton để tránh nhấp nháy
 
 while True:
 
@@ -138,11 +149,12 @@ while True:
                        batch=BATCH_SIZE)
     res = results[0]
     
-    # Chỉ vẽ annotation mỗi N frame
+    # Chỉ vẽ annotation mỗi N frame; khung xen kẽ tái sử dụng ảnh đã vẽ trước đó để tránh nhấp nháy
     if frame_idx % DRAW_EVERY_N_FRAMES == 0:
         annotated = res.plot()
+        last_annotated = annotated
     else:
-        annotated = frame.copy()
+        annotated = last_annotated if last_annotated is not None else frame.copy()
 
     counter = 0
     stage = "up"
@@ -171,8 +183,6 @@ while True:
     # -----------------------------
     # 🖼️ Overlay text
     # -----------------------------
-    form_score, feedback, tone = form_func(kps, annotated, stage, counter)
-    form_color = (0, 255, 0) if tone == "good" else (0, 0, 255)
     # For plank display, use elapsed time (counter represents elapsed now)
     if EXERCISE == "plank":
         elapsed = state.get("elapsed", float(counter) if counter is not None else 0.0)
