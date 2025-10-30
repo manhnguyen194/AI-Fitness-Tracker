@@ -1,7 +1,24 @@
 import time
+import math
 from utils.geometry import calculate_angle
 
 DELTA_THRESHOLD = 5  # độ thay đổi nhỏ thì bỏ qua (để tránh rung hình)
+
+def _valid_pt(pt):
+    try:
+        x, y = pt
+        return x is not None and y is not None and not (math.isnan(x) or math.isnan(y))
+    except Exception:
+        return False
+
+def _safe_angle(a, default=180.0):
+    try:
+        a = float(a)
+        if math.isnan(a) or a is None:
+            return default
+        return a
+    except Exception:
+        return default
 
 # ======================================
 # 🦵 SQUAT
@@ -79,45 +96,54 @@ def count_pushup(kps, state):
     return state["counter"], state.get("direction", "up"), angle
 
 # ======================================
-# 🧍‍♀️ PLANK
+# 🧍‍♀️ PLANK (NO REP COUNTER)
 # ======================================
 PLANK_MIN_ANGLE = 160  # lưng-hông thẳng
 PLANK_MAX_ANGLE = 190
 
 def count_plank(kps, state):
     """
-    Đếm thời gian giữ plank với form đúng.
-    - kps: keypoints
-    - state: {'start_time', 'good_time', 'bad_time', 'is_good'}
+    Return:
+      elapsed_seconds (float), label ("holding"), angle (float)
+    Do NOT return a rep counter for plank.
     """
-    left_shoulder, left_hip, left_ankle = kps[5], kps[11], kps[15]
-    angle = calculate_angle(left_shoulder, left_hip, left_ankle)
+    state.setdefault("start_time", None)
+    state.setdefault("good_time", 0.0)
+    state.setdefault("bad_time", 0.0)
+    state.setdefault("is_good", False)
+    state.setdefault("last_time", time.time())
+    state.setdefault("elapsed", 0.0)
+    state.setdefault("angle", 0.0)
 
-    # Xác định form có tốt không
-    is_good = PLANK_MIN_ANGLE <= angle <= PLANK_MAX_ANGLE
+    try:
+        left_shoulder, left_hip, left_ankle = kps[5], kps[11], kps[15]
+    except Exception:
+        return float(state.get("elapsed", 0.0)), "holding", float(state.get("angle", 0.0))
+
+    if not (_valid_pt(left_shoulder) and _valid_pt(left_hip) and _valid_pt(left_ankle)):
+        return float(state.get("elapsed", 0.0)), "holding", float(state.get("angle", 0.0))
+
+    angle = _safe_angle(calculate_angle(left_shoulder, left_hip, left_ankle))
     now = time.time()
+    dt = now - state.get("last_time", now)
+    state["last_time"] = now
 
-    if "start_time" not in state:
+    is_good = PLANK_MIN_ANGLE <= angle <= PLANK_MAX_ANGLE
+
+    if state.get("start_time") is None:
         state["start_time"] = now
-        state["good_time"] = 0
-        state["bad_time"] = 0
-        state["is_good"] = is_good
 
-    elapsed = now - state["start_time"]
     if is_good:
-        state["good_time"] += 1 / 30.0  # ~30 FPS giả định
+        state["good_time"] += dt
     else:
-        state["bad_time"] += 1 / 30.0
-
-    # Form ổn định trong ≥1s thì báo OK
-    feedback = "Form đúng" if is_good else "Hông bị xệ" if angle < PLANK_MIN_ANGLE else "Lưng cong"
+        state["bad_time"] += dt
 
     state["angle"] = angle
-    state["elapsed"] = elapsed
-    state["feedback"] = feedback
+    state["elapsed"] = now - state["start_time"]
+    state["feedback"] = "Form đúng" if is_good else ("Hông bị xệ" if angle < PLANK_MIN_ANGLE else "Lưng cong")
     state["is_good"] = is_good
 
-    return int(state["good_time"]), "holding", angle
+    return float(state["elapsed"]), "holding", float(angle)
 
 # ======================================
 # 🤸 SIT-UP

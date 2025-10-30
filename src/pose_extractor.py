@@ -153,9 +153,15 @@ while True:
     if res.keypoints is not None and len(res.keypoints.xy) > 0:
         kps = res.keypoints.xy[0].tolist()
 
-        # Gọi hàm đếm và đánh giá form tương ứng bài tập
+    # Gọi hàm đếm và đánh giá form tương ứng bài tập
         counter, stage, angle = counter_func(kps, state)
         form_score, feedback, tone = form_func(kps, annotated, stage, counter)
+
+    # 💡 Thêm dòng này
+        form_color = (0, 255, 0) if tone == "good" else (0, 0, 255)
+    else:
+        form_color = (255, 255, 255)
+        feedback = "Không phát hiện người"
 
     # -----------------------------
     # 🧮 Tính FPS
@@ -166,16 +172,12 @@ while True:
     # 🖼️ Overlay text
     # -----------------------------
     form_score, feedback, tone = form_func(kps, annotated, stage, counter)
-
-    form_color = {
-        "positive": (0, 255, 0),
-        "neutral": (255, 255, 0),
-        "negative": (255, 80, 80)
-    }.get(tone, (200, 200, 200))
-
+    form_color = (0, 255, 0) if tone == "good" else (0, 0, 255)
+    # For plank display, use elapsed time (counter represents elapsed now)
     if EXERCISE == "plank":
+        elapsed = state.get("elapsed", float(counter) if counter is not None else 0.0)
         lines = [
-            (f"Thời gian giữ: {counter:.1f}s", (255, 215, 0)),
+            (f"Thời gian giữ: {elapsed:.1f}s", (255, 215, 0)),
             (f"Tư thế: {'Chuẩn' if state.get('is_good') else 'Chưa đúng'}", (255, 255, 255)),
             (f"Góc: {int(angle)}°", (144, 238, 144)),
             (f"Đánh giá: {feedback}", form_color),
@@ -191,6 +193,8 @@ while True:
         ]
 
     annotated = draw_text_pil(annotated, lines, font_path=FONT_PATH, font_scale=26, pos=(20, 20))
+
+
 
     # -----------------------------
     # 🖥️ Hiển thị video auto-scale
