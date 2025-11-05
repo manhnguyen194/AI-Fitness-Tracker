@@ -29,10 +29,11 @@ def draw_colored_line(frame, p1, p2, color=(0, 255, 0), thickness=3):
         cv2.line(frame, p1, p2, color, thickness)
 
 
-def draw_text_pil(frame_bgr, lines, font_path, font_scale=28, pos=(20, 20)):
+def draw_text_pil(frame_bgr, lines, font_path, font_scale=28, pos=(20, 20), wrap_text=True):
     """
-    Vẽ nhiều dòng text tiếng Việt lên frame, tự động xuống dòng theo chiều rộng thật.
+    Vẽ nhiều dòng text tiếng Việt lên frame.
     - lines: [(text, color)]
+    - wrap_text: Nếu True, tự động xuống dòng theo chiều rộng. Nếu False, mỗi dòng vẽ trực tiếp (phù hợp cho overlay).
     """
     img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(img_rgb)
@@ -43,29 +44,46 @@ def draw_text_pil(frame_bgr, lines, font_path, font_scale=28, pos=(20, 20)):
     font = load_font(font_path, computed_size)
 
     x, y = pos
-    max_text_width = int(w_img * 0.9)  # Giới hạn chiều rộng dòng = 90% frame
-
-    for text, color in lines:
-        words = text.split(" ")
-        current_line = ""
-        for word in words:
-            test_line = f"{current_line} {word}".strip()
-            # Dùng textbbox để tính bề ngang dòng text thực tế
-            bbox = draw.textbbox((0, 0), test_line, font=font)
-            line_width = bbox[2] - bbox[0]
-            if line_width <= max_text_width:
-                current_line = test_line
-            else:
-                # Vẽ dòng đầy
-                draw.text((x, y), current_line, font=font, fill=color,
-                          stroke_width=max(1, computed_size // 14),
-                          stroke_fill=(0, 0, 0))
-                y += int(computed_size * 1.4)
-                current_line = word
-        # Vẽ dòng cuối cùng
-        if current_line:
-            draw.text((x, y), current_line, font=font, fill=color,
+    
+    if not wrap_text:
+        # Simple overlay mode: render each line directly without wrapping
+        line_spacing = int(computed_size * 1.3)
+        for text, color in lines:
+            # Convert color from BGR to RGB for PIL
+            color_rgb = tuple(reversed(color)) if len(color) == 3 else color
+            draw.text((x, y), text, font=font, fill=color_rgb,
                       stroke_width=max(1, computed_size // 14),
                       stroke_fill=(0, 0, 0))
-            y += int(computed_size * 1.6)
+            y += line_spacing
+    else:
+        # Original wrapping mode
+        max_text_width = int(w_img * 0.9)  # Giới hạn chiều rộng dòng = 90% frame
+        for text, color in lines:
+            words = text.split(" ")
+            current_line = ""
+            for word in words:
+                test_line = f"{current_line} {word}".strip()
+                # Dùng textbbox để tính bề ngang dòng text thực tế
+                bbox = draw.textbbox((0, 0), test_line, font=font)
+                line_width = bbox[2] - bbox[0]
+                if line_width <= max_text_width:
+                    current_line = test_line
+                else:
+                    # Vẽ dòng đầy
+                    # Convert color from BGR to RGB for PIL
+                    color_rgb = tuple(reversed(color)) if len(color) == 3 else color
+                    draw.text((x, y), current_line, font=font, fill=color_rgb,
+                              stroke_width=max(1, computed_size // 14),
+                              stroke_fill=(0, 0, 0))
+                    y += int(computed_size * 1.4)
+                    current_line = word
+            # Vẽ dòng cuối cùng
+            if current_line:
+                # Convert color from BGR to RGB for PIL
+                color_rgb = tuple(reversed(color)) if len(color) == 3 else color
+                draw.text((x, y), current_line, font=font, fill=color_rgb,
+                          stroke_width=max(1, computed_size // 14),
+                          stroke_fill=(0, 0, 0))
+                y += int(computed_size * 1.6)
+    
     return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)

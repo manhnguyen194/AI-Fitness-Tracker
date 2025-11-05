@@ -9,6 +9,24 @@ import numpy as np
 from rep_counter import count_squat, count_pushup, count_plank, count_situp
 from form_rules import evaluate_squat, evaluate_pushup, evaluate_plank, evaluate_situp
 from utils.draw_utils import draw_text_pil
+from utils.video_utils import compute_fps
+
+if torch.cuda.is_available():
+    device = torch.device("cuda:0")
+    print("=== 🔍 GPU/CUDA Status ===")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    print(f"Current device: {torch.cuda.current_device()}")
+    print(f"Device name: {torch.cuda.get_device_name(0)}")
+    print(f"Device memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    print("=====================")
+    # Optimize CUDA backends for real-time
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+else:
+    device = torch.device("cpu")
+    print("⚠️ CUDA not available. Running on CPU.")
 
 try:
     from moviepy.editor import ImageSequenceClip
@@ -16,6 +34,49 @@ try:
 except Exception:
     ImageSequenceClip = None
     USE_MOVIEPY = False
+
+# Global model and stream state for webcam processing
+GLOBAL_MODEL = None
+GLOBAL_CONF = 0.5
+GLOBAL_IMG_SIZE = 384  # smaller input for higher FPS
+GLOBAL_DRAW_EVERY_N = 8  # draw skeleton less frequently to reduce cost
+GLOBAL_USE_HALF = bool(torch.cuda.is_available())  # dùng FP16 nếu có CUDA
+GLOBAL_INFER_EVERY_N = 4  # run inference every N frames
+GLOBAL_FAST_OVERLAY = True  # use OpenCV text for faster overlay
+GLOBAL_DISPLAY_SIZE = (480, 270)  # smaller UI frame for higher browser FPS
+
+def _get_model():
+    """Lazily initialize and reuse the YOLO model for webcam frames."""
+    global GLOBAL_MODEL
+    if GLOBAL_MODEL is None:
+        m = YOLO("yolo11n-pose.pt")
+        m.conf = GLOBAL_CONF
+        try:
+            m.to(device)
+        except Exception:
+            pass
+        # Fuse Conv+BN để tăng tốc nếu được hỗ trợ
+        try:
+            m.fuse()
+        except Exception:
+            pass
+        # Warm-up: chạy 1 lần để nạp kernel/JIT, giảm độ trễ khung đầu tiên
+        try:
+            import numpy as _np
+            dummy = _np.zeros((GLOBAL_IMG_SIZE, GLOBAL_IMG_SIZE, 3), dtype=_np.uint8)
+            with torch.inference_mode():
+                _ = m.predict(dummy, verbose=False, device=str(device), imgsz=GLOBAL_IMG_SIZE, half=GLOBAL_USE_HALF, max_det=1, conf=GLOBAL_CONF)
+        except Exception:
+            pass
+        GLOBAL_MODEL = m
+    return GLOBAL_MODEL
+
+# Maintain per-exercise state across streaming frames
+STREAM_STATE = {}
+STREAM_PREV_TIME = None
+STREAM_FRAME_IDX = 0
+STREAM_LAST_PLOT = None  # cache annotated skeleton frame để tái sử dụng
+STREAM_LAST_RES = None    # cache kết quả inference gần nhất
 
 # Exercise registry
 EXERCISE_REGISTRY = {
@@ -41,6 +102,180 @@ EXERCISE_REGISTRY = {
     }
 }
 
+
+def process_frame_for_display(frame, exercise_type):
+    """Process a single RGB frame from webcam and return an annotated RGB frame.
+    Uses same logic/config as pose_extractor: resize for inference, cache plots,
+    compute fps with compute_fps(), robustly call counter/form functions.
+    """
+    global STREAM_STATE, STREAM_FRAME_IDX, STREAM_LAST_PLOT, STREAM_LAST_RES, STREAM_PREV_TIME
+
+    # Init per-exercise state
+    if not STREAM_STATE:
+        STREAM_STATE = {k: v["state"].copy() for k, v in EXERCISE_REGISTRY.items()}
+
+    # font
+    font_path = os.path.join(os.path.dirname(__file__), "..", "fonts", "Roboto.ttf")
+    if not os.path.exists(font_path):
+        font_path = "arial.ttf"
+
+    model = _get_model()
+
+    # frame expected RGB from Gradio -> convert to ndarray BGR/RGB as needed for model
+    annotated = None
+    res = None
+    try:
+        # prepare input: keep as RGB (ultralytics accepts numpy RGB)
+        in_frame = frame
+        if isinstance(frame, np.ndarray):
+            h, w = frame.shape[:2]
+            if max(h, w) > GLOBAL_IMG_SIZE:
+                scale = GLOBAL_IMG_SIZE / max(h, w)
+                new_w = max(1, int(w * scale))
+                new_h = max(1, int(h * scale))
+                in_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        run_infer = (STREAM_FRAME_IDX % GLOBAL_INFER_EVERY_N == 0) or (STREAM_LAST_RES is None)
+        if run_infer:
+            with torch.inference_mode():
+                results = model.predict(
+                    in_frame,
+                    verbose=False,
+                    device=str(device),
+                    imgsz=GLOBAL_IMG_SIZE,
+                    half=GLOBAL_USE_HALF,
+                    max_det=1,
+                    conf=GLOBAL_CONF,
+                )
+            res = results[0]
+            STREAM_LAST_RES = res
+        else:
+            res = STREAM_LAST_RES
+
+        # draw annotation only every N frames to save time
+        if STREAM_FRAME_IDX % GLOBAL_DRAW_EVERY_N == 0 or STREAM_LAST_PLOT is None:
+            annotated = res.plot()  # returns BGR image
+            STREAM_LAST_PLOT = annotated
+        else:
+            annotated = STREAM_LAST_PLOT
+
+    except Exception as e:
+        print(f"Webcam model error: {e}")
+        # fallback: convert RGB -> BGR for consistency when plot not available
+        annotated = frame[:, :, ::-1] if isinstance(frame, np.ndarray) and frame.ndim == 3 else frame
+
+    # process keypoints / counters / feedback
+    try:
+        counter = 0
+        stage_or_good = None
+        angle = None
+        feedback = "..."
+        tone = None
+        form_color = (0, 255, 0)
+
+        if res is not None and hasattr(res, "keypoints") and res.keypoints is not None and len(res.keypoints.xy) > 0:
+            kps = res.keypoints.xy[0].tolist()
+            exercise = EXERCISE_REGISTRY[exercise_type]
+            counter_func = exercise["counter_func"]
+            form_func = exercise["form_func"]
+            state = STREAM_STATE[exercise_type]
+
+            result = counter_func(kps, state)
+            if isinstance(result, (tuple, list)):
+                if len(result) == 3:
+                    counter, stage_or_good, angle = result
+                elif len(result) == 2:
+                    counter, stage_or_good = result
+                    angle = None
+                else:
+                    counter = result[0]
+            else:
+                counter = result
+
+            # robust calls for form evaluator
+            ret = None
+            try:
+                ret = form_func(kps, annotated, stage_or_good, counter)
+            except TypeError:
+                try:
+                    ret = form_func(kps, annotated, counter)
+                except TypeError:
+                    try:
+                        ret = form_func(kps, counter)
+                    except Exception as e:
+                        print(f"Form eval error: {e}")
+                        ret = None
+            except Exception as e:
+                print(f"Form eval error: {e}")
+                ret = None
+
+            if isinstance(ret, (tuple, list)):
+                if len(ret) >= 2:
+                    form_score, feedback = ret[0], ret[1]
+                elif len(ret) == 1:
+                    form_score = ret[0]
+            elif isinstance(ret, (int, float, str)):
+                feedback = str(ret)
+
+        if isinstance(tone, str):
+            form_color = (0, 255, 0) if tone == "good" else (0, 0, 255)
+
+        # Build overlay lines
+        if exercise_type == "Plank":
+            elapsed = float(counter) if counter is not None else 0.0
+            lines = [
+                (f"Thời gian giữ: {elapsed:.1f}s", (255, 215, 0)),
+                (f"Tư thế: {'Chuẩn' if stage_or_good else 'Chưa đúng'}", (255, 255, 255)),
+                (f"Góc: {int(angle) if angle is not None else '?'}°", (144, 238, 144)),
+                (f"Đánh giá: {feedback}", form_color),
+            ]
+        else:
+            angle_text = f"{int(angle)}°" if angle is not None else "?"
+            stage_text = stage_or_good if stage_or_good is not None else "?"
+            lines = [
+                (f"Số lần: {counter}", (255, 215, 0)),
+                (f"Trạng thái: {stage_text}", (255, 255, 255)),
+                (f"Góc: {angle_text}", (144, 238, 144)),
+                (f"Đánh giá: {feedback}", form_color),
+            ]
+
+        # compute FPS using helper
+        fps, STREAM_PREV_TIME = compute_fps(STREAM_PREV_TIME) if 'compute_fps' in globals() else (0.0, time.time())
+        lines.append((f"FPS: {fps:.1f}", (200, 200, 200)))
+
+        if annotated is None:
+            annotated = frame[:, :, ::-1] if isinstance(frame, np.ndarray) and frame.ndim == 3 else frame
+
+        # overlay text - always use PIL for Vietnamese support
+        annotated = draw_text_pil(annotated, lines, font_path, font_scale=20, pos=(18, 24), wrap_text=False)
+
+    except Exception as e:
+        print(f"Webcam frame process error: {e}")
+
+    # final normalization -> RGB uint8 for Gradio
+    try:
+        arr = np.asarray(annotated)
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+        if arr.ndim == 2:
+            arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2RGB)
+        if arr.shape[2] == 4:
+            arr = arr[:, :, :3]
+        # ensure target display size
+        try:
+            if isinstance(GLOBAL_DISPLAY_SIZE, tuple) and len(GLOBAL_DISPLAY_SIZE) == 2:
+                dw, dh = GLOBAL_DISPLAY_SIZE
+                if dw > 0 and dh > 0 and (arr.shape[1] != dw or arr.shape[0] != dh):
+                    arr = cv2.resize(arr, (dw, dh), interpolation=cv2.INTER_AREA)
+        except Exception:
+            pass
+        # annotated from res.plot is BGR -> convert to RGB
+        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+        STREAM_FRAME_IDX += 1
+        return arr
+    except Exception as e:
+        print(f"Webcam normalization error: {e}")
+        return frame
 
 def process_video(video_path, exercise_type, device=None, imgsz=480, conf=0.5, draw_every_n=1):
     """Process a video file and return list of annotated frames (RGB uint8 numpy arrays).
@@ -356,22 +591,53 @@ def fitness_tracker(video, exercise_type):
 def build_ui():
     with gr.Blocks(title="AI Fitness Tracker") as demo:
         gr.Markdown("# 🏋️‍♂️ AI Fitness Tracker")
-        with gr.Row():
-            video_input = gr.Video(label="Upload video (MP4) or paste path")
-            exercise = gr.Dropdown(list(EXERCISE_REGISTRY.keys()), label="Exercise", value=list(EXERCISE_REGISTRY.keys())[0])
-        run_btn = gr.Button("Start Processing")
-        output_file = gr.File(label="Output video (downloadable)")
 
-        def _run(video, exercise_type):
-            print("User requested processing...")
-            return fitness_tracker(video, exercise_type)
+        # --- Chọn bài tập ---
+        exercise = gr.Dropdown(
+            list(EXERCISE_REGISTRY.keys()),
+            label="Chọn bài tập",
+            value=list(EXERCISE_REGISTRY.keys())[0]
+        )
 
-        run_btn.click(_run, inputs=[video_input, exercise], outputs=[output_file])
+        # --- Tabs: Upload video hoặc dùng Webcam ---
+        with gr.Tabs():
+            with gr.Tab("📁 Upload Video"):
+                video_input = gr.Video(label="Tải video bài tập (MP4 hoặc đường dẫn)")
+                run_btn = gr.Button("🎬 Phân tích Video")
+                output_video = gr.Video(label="🎞️ Xem kết quả (MP4)")
+                output_file = gr.File(label="📦 Tải xuống kết quả (MP4)")
+
+                def _run(video, exercise_type):
+                    print("🔹 Đang xử lý video đã tải lên...")
+                    path = fitness_tracker(video, exercise_type)
+                    # Trả về cùng một đường dẫn cho video xem trực tiếp và file tải xuống
+                    return path, path
+
+                run_btn.click(_run, inputs=[video_input, exercise], outputs=[output_video, output_file])
+
+            with gr.Tab("🎥 Webcam Trực Tiếp"):
+                # Dùng gr.Image với nguồn webcam để tương thích phiên bản Gradio hiện tại
+                webcam_stream = gr.Image(sources=["webcam"], streaming=True, type="numpy", label="Webcam (live)")
+
+                def _process(frame, exercise_type):
+                    try:
+                        return process_frame_for_display(frame, exercise_type)
+                    except Exception as e:
+                        print("Webcam frame processing error:", e)
+                        return frame
+
+                # Stream realtime: input là frame + bài tập, output ghi đè lên cùng khung
+                webcam_stream.stream(fn=_process, inputs=[webcam_stream, exercise], outputs=[webcam_stream])
+
 
     return demo
 
 
 if __name__ == "__main__":
     app = build_ui()
-    # launch Gradio app in blocking mode so the script does not exit
-    app.launch(server_name="0.0.0.0", server_port=7860, share=False)
+    try:
+        # launch Gradio app in blocking mode so the script does not exit
+        app.launch(server_name="localhost", server_port=7860, share=False)
+    except Exception as e:
+        print(f"Failed to launch Gradio app: {e}")
+        raise

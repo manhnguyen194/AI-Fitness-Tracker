@@ -196,3 +196,17 @@ def evaluate_situp(keypoints, frame=None, stage=None, counter=None):
 
     # Nếu chưa hoàn thành rep, giữ nguyên feedback cũ
     return 100, feedback_manager.last_feedback, "neutral"
+
+# ======================
+#  dispatcher
+# ======================
+def evaluate_form_feedback(exercise_type, keypoints, frame=None, stage=None, counter=None):
+    if exercise_type == "squat":
+        return evaluate_squat(keypoints, frame, stage, counter)
+    elif exercise_type == "pushup":
+        return evaluate_pushup(keypoints, frame, stage, counter)
+    elif exercise_type == "plank":
+        return evaluate_plank(keypoints, frame, stage, counter)
+    elif exercise_type == "situp":
+        return evaluate_situp(keypoints, frame, stage, counter)
+    return 100, "Unknown exercise type", "neutral"
