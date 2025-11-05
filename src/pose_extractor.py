@@ -16,11 +16,13 @@ from form_rules import (
     evaluate_squat, evaluate_pushup, evaluate_plank, evaluate_situp
 )
 
+import voice_player
+
 # -----------------------------
 # ⚙️ Cấu hình
 # -----------------------------
-EXERCISE =  "pushup" # hoặc "squat"
-VIDEO_REL = os.path.join("data", "raw", "pushup_ok_01.mp4")
+EXERCISE =  "plank" # hoặc "squat"
+VIDEO_REL = os.path.join("data", "raw", "plank_ok_01.mp4")
 
 # file data/ nằm bên trong src/, không phải ở project root -> không cần ".."
 VIDEO_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), VIDEO_REL))
@@ -116,6 +118,27 @@ counter_func = exercise_registry[EXERCISE]["counter_func"]
 form_func = exercise_registry[EXERCISE]["form_func"]
 state = exercise_registry[EXERCISE]["state"]
 
+
+# --- Voice player init ---
+VOICES_DIR = r"C:\Users\Admin\Downloads\AI-Fitness-Tracker\src\data\voices"
+
+
+# dùng explicit mapping để chắc chắn.
+explicit = {
+    "positive": "positive_voice_pcm.wav",
+    "neutral":  "neutral_voice_pcm.wav",
+    "negative": "negative_voice_pcm.wav",
+}
+
+# --- Voice player init (periodic-only) ---
+VOICES_DIR = r"C:\Users\Admin\Downloads\AI-Fitness-Tracker\src\data\voices"
+
+# Khởi tạo periodic player: mỗi 3 giây đọc tone hiện tại và phát
+voice_player.init(VOICES_DIR, interval=10.0, allow_overlap=False)
+# ------------------------------------------------
+
+
+
 # -----------------------------
 # 🔁 Vòng lặp chính
 # -----------------------------
@@ -156,6 +179,11 @@ while True:
         # Gọi hàm đếm và đánh giá form tương ứng bài tập
         counter, stage, angle = counter_func(kps, state)
         form_score, feedback, tone = form_func(kps, annotated, stage, counter)
+
+        # Cập nhật voice player với tone hiện tại
+        # tone được thiết kế bởi feedback_utils: "positive"|"neutral"|"negative"
+        # voice_player sẽ tìm file tương ứng trong VOICES_DIR (explicit mapping)
+        voice_player.set_tone(tone)
 
     # -----------------------------
     # 🧮 Tính FPS
@@ -206,3 +234,6 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
+
+# Dừng voice player an toàn
+voice_player.stop()
