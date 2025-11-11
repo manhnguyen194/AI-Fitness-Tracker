@@ -16,6 +16,8 @@ from form_rules import (
     evaluate_squat, evaluate_pushup, evaluate_plank, evaluate_situp
 )
 
+import voice_player
+
 # -----------------------------
 # ⚙️ Cấu hình
 # -----------------------------
@@ -82,10 +84,10 @@ model = YOLO("yolo11n-pose.pt")
 model.conf = CONF_THRESHOLD
 model.to(device)
 
-cap = cv2.VideoCapture(CAP_SOURCE)
+cap = cv2.VideoCapture(VIDEO_PATH)
 
 if not cap.isOpened():
-    print("❌ Không thể mở nguồn capture:", CAP_SOURCE)
+    print("❌ Không thể mở video hoặc webcam:", VIDEO_PATH)
     exit()
 print("▶️ Bắt đầu. Nhấn 'q' để thoát.")
 
@@ -126,13 +128,31 @@ counter_func = exercise_registry[EXERCISE]["counter_func"]
 form_func = exercise_registry[EXERCISE]["form_func"]
 state = exercise_registry[EXERCISE]["state"]
 
+
+# --- Voice player init ---
+# Build the path dynamically relative to the current script
+BASE_DIR = os.path.dirname(__file__)  # folder containing this file (e.g. src/)
+VOICES_DIR = os.path.join(BASE_DIR, "data", "voices")
+
+voice_player.init(VOICES_DIR, interval=10.0)
+
+
+# dùng explicit mapping để chắc chắn.
+explicit = {
+    "positive": "positive_voice_pcm.wav",
+    "neutral":  "neutral_voice_pcm.wav",
+    "negative": "negative_voice_pcm.wav",
+}
+# ------------------------------------------------
+
+
+
 # -----------------------------
 # 🔁 Vòng lặp chính
 # -----------------------------
 prev_time = time.time()
 frame_idx = 0
 last_annotated = None  # cache frame có skeleton để tránh nhấp nháy
-
 while True:
 
     ret, frame = cap.read()
@@ -168,6 +188,10 @@ while True:
     # Gọi hàm đếm và đánh giá form tương ứng bài tập
         counter, stage, angle = counter_func(kps, state)
         form_score, feedback, tone = form_func(kps, annotated, stage, counter)
+        # Cập nhật voice player với tone hiện tại
+        # tone được thiết kế bởi feedback_utils: "positive"|"neutral"|"negative"
+        # voice_player sẽ tìm file tương ứng trong VOICES_DIR (explicit mapping)
+        voice_player.set_tone(tone)
 
     # 💡 Thêm dòng này
         form_color = (0, 255, 0) if tone == "good" else (0, 0, 255)
@@ -204,8 +228,6 @@ while True:
 
     annotated = draw_text_pil(annotated, lines, font_path=FONT_PATH, font_scale=26, pos=(20, 20))
 
-
-
     # -----------------------------
     # 🖥️ Hiển thị video auto-scale
     # -----------------------------
@@ -220,3 +242,6 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
+
+# Dừng voice player an toàn
+voice_player.stop()
