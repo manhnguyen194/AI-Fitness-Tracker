@@ -123,18 +123,11 @@ state = exercise_registry[EXERCISE]["state"]
 VOICES_DIR = r"C:\Users\Admin\Downloads\AI-Fitness-Tracker\src\data\voices"
 
 
-# dùng explicit mapping để chắc chắn.
-explicit = {
-    "positive": "positive_voice_pcm.wav",
-    "neutral":  "neutral_voice_pcm.wav",
-    "negative": "negative_voice_pcm.wav",
-}
-
 # --- Voice player init (periodic-only) ---
 VOICES_DIR = r"C:\Users\Admin\Downloads\AI-Fitness-Tracker\src\data\voices"
 
-# Khởi tạo periodic player: mỗi 3 giây đọc tone hiện tại và phát
-voice_player.init(VOICES_DIR, interval=10.0, allow_overlap=False)
+# phát welcome.mp3 → đợi 2s → lần đầu theo tone là 5s, sau đó giữ nguyên tone thì 4s
+voice_player.init(VOICES_DIR, base_interval_first=6.0, base_interval_same=5.0)
 # ------------------------------------------------
 
 
