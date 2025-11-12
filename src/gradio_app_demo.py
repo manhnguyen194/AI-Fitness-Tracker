@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
 """
-gradio_app_demo.py (MERGED + Aspect Ratio Fix + Overlay Fix + Rep Counter Fix)
+gradio_app_demo.py (ĐÃ SỬA LỖI HOÀN CHỈNH)
 
-- Nền tảng: Code mới với EXERCISE_REGISTRY, form_rules, và utils.
-- Tính năng Webcam: Đã thay thế webcam-trong-gradio bằng webcam-ngoài (external OpenCV window)
-  từ code cũ (external_webcam_loop).
-- Tính năng Video: Đã thay thế process_video (all-in-one) bằng process_video_split_parts (chia 3 phần)
-  từ code cũ.
-- Tích hợp: Cả webcam-ngoài và video-3-phần đều đã được cập nhật
-  để gọi EXERCISE_REGISTRY (counter_func, form_func) và dùng draw_text_pil.
-- UI: Giao diện (build_ui) đã được cập nhật để điều khiển các tính năng mới này.
-- FIX 1: Cập nhật hàm process_range để giữ tỉ lệ khung hình (aspect ratio)
-  của video upload, tránh bị kéo dãn (stretch) bằng cách dùng letterbox/pillarbox.
-- FIX 2: Khởi tạo các biến counter, stage, angle *trước* khối if/else
-  trong _process_frame_logic để tránh lỗi UnboundLocalError khi không phát hiện người.
-- UPDATE: Đồng bộ cấu hình (IMG_SIZE=640, INFER_EVERY_N=3) và logic overlay
-   từ pose_extractor.py.
-- FIX 3 (RẤT QUAN TRỌNG): Sửa lỗi không gán (unpack) kết quả (counter, stage, angle)
-  trả về từ counter_func trong _process_frame_logic.
-- FIX 4 (MỚI): Sửa lỗi resize/scale keypoint. Ép frame về 640x640
-  và dùng keypoint trực tiếp (giống pose_extractor.py).
-- FIX 5 (MỚI): Cập nhật lệnh gọi form_func để truyền 'state' (khớp với form_rules.py mới).
+- FIX 1 (Lỗi kéo giãn): Sửa lỗi gõ nhầm 'out_h, out_h' thành 'out_h, out_w'
+  trong hàm process_range (dòng 535).
+- FIX 7 (Lỗi Webcam): Sửa lỗi 'UnboundLocalError' bằng cách
+  đổi 'frame_count' thành 'frame_idx' (dòng 373-380).
+- FIX 8 (Lỗi Video): Sửa lỗi 'KeyError' bằng cách gán kết quả
+  vào 'local_state[exercise]' thay vì 'local_state' (dòng 515).
+- FIX 9 (Yêu cầu): ĐÃ BẬT LẠI (un-comment) dòng "Đánh giá: {feedback}"
+  trong _process_frame_logic (dòng 310 và 318).
+- FIX 10 (Tương thích): Sửa lỗi gọi 'form_func' để khớp với
+  file form_rules.py mới (truyền 5 tham số, bao gồm 'state').
 """
 
 import os
@@ -40,7 +31,7 @@ import atexit
 
 # === Import logic mới ===
 from rep_counter import count_squat, count_pushup, count_plank, count_situp
-# Import per-exercise evaluation functions from form_rules
+# 🛠️ SỬA: Import các hàm đánh giá cụ thể
 from form_rules import evaluate_squat, evaluate_pushup, evaluate_plank, evaluate_situp
 from utils.draw_utils import draw_text_pil
 from utils.video_utils import compute_fps
@@ -72,8 +63,16 @@ else:
     print("⚠️ CUDA not available. Running on CPU.")
 
 try:
-    from moviepy.editor import ImageSequenceClip
-    USE_MOVIEPY = True
+    import importlib
+    import importlib.util
+    spec = importlib.util.find_spec("moviepy.editor")
+    if spec is not None:
+        moviepy = importlib.import_module("moviepy.editor")
+        ImageSequenceClip = getattr(moviepy, "ImageSequenceClip", None)
+        USE_MOVIEPY = ImageSequenceClip is not None
+    else:
+        ImageSequenceClip = None
+        USE_MOVIEPY = False
 except Exception:
     ImageSequenceClip = None
     USE_MOVIEPY = False
@@ -150,17 +149,31 @@ def safe_extract_kps(res):
     try:
         r0 = res[0]
         if hasattr(r0, "keypoints") and r0.keypoints is not None:
+            # 🛠️ SỬA (FIX 4): Logic này được cập nhật để chỉ lấy 'xy'
+            # và người có conf cao nhất, khớp với logic mong muốn.
             if not res or not res.keypoints or not res.boxes:
                 return None
-            # Chọn person với conf cao nhất
+            
             confs = res.boxes.conf.cpu().numpy() if res.boxes.conf is not None else []
             if len(confs) == 0:
                 return None
+            
             max_idx = np.argmax(confs)
             if confs[max_idx] < 0.6:  # Threshold để bỏ low-conf
                 return None
-            kps = res.keypoints.xy[max_idx].tolist()
-            return np.array(kps)[:, :2]  # Trả array cho dễ dùng
+
+            kps_tensor = getattr(res.keypoints, "xy", None)
+            if kps_tensor is None:
+                return None
+                
+            kps_list = kps_tensor.cpu().numpy()
+            if max_idx >= len(kps_list):
+                return None # Index out of bounds
+                
+            kps = kps_list[max_idx] # Lấy KPS của người có conf cao nhất
+            
+            if kps.ndim == 2 and kps.shape[0] > 0 and kps.shape[1] >= 2:
+                 return kps[:, :2]  # Trả array cho dễ dùng
     except Exception:
         pass
     return None
@@ -218,7 +231,7 @@ def _process_frame_logic(frame_bgr, exercise_type, state_dict, prev_time):
                 device=str(device),
                 imgsz=GLOBAL_IMG_SIZE,
                 half=GLOBAL_USE_HALF,
-                max_det=1,
+                max_det=1, # Giới hạn 1 người
                 conf=GLOBAL_CONF,
             )
         res = results[0]
@@ -277,23 +290,23 @@ def _process_frame_logic(frame_bgr, exercise_type, state_dict, prev_time):
             # Gọi form_func (robust)
             ret = None
             try: 
-                # 🛠️ SỬA (FIX 5): Truyền 'state' vào form_func
-                ret = form_func(kps_scaled.tolist(), annotated, stage_or_good, counter)
-            except TypeError:
-                try: 
-                    # Fallback nếu form_func không nhận state
-                    ret = form_func(kps_scaled.tolist(), annotated, counter)
-                except TypeError:
-                    try: 
-                        ret = form_func(kps_scaled.tolist(), counter)
-                    except Exception: ret = None
-            except Exception: ret = None
+                # 🛠️ SỬA (FIX 10): Truyền 'state' vào form_func (để khớp với form_rules.py ĐÃ SỬA)
+                ret = form_func(kps_scaled.tolist(), state, annotated, stage_or_good, counter)
+            except Exception as e_form:
+                # In lỗi TypeError nếu form_rules.py CHƯA được cập nhật
+                print(f"Lỗi khi gọi form_func (Kiểm tra form_rules.py): {e_form}")
+                ret = None
 
             if ret is not None and isinstance(ret, tuple) and len(ret) >= 3:
                 form_score, feedback, tone = ret
-                form_color = (0, 255, 0) if tone == "good" else (0, 0, 255)
+                if tone == "bad": form_color = (0, 0, 255) # Xấu (BGR)
+                elif tone == "warn": form_color = (0, 165, 255) # Cam (BGR)
+            elif ret is not None:
+                feedback = str(ret)
+                
         except Exception as e:
             print(f"Lỗi counter/form: {e}")
+            traceback.print_exc()
             feedback = "Lỗi xử lý"
 
     # 5. Tính FPS
@@ -306,7 +319,7 @@ def _process_frame_logic(frame_bgr, exercise_type, state_dict, prev_time):
                 (f"Thời gian giữ: {counter:.1f}s", (255, 215, 0)),
                 (f"Tư thế: {'Chuẩn' if stage_or_good else 'Chưa đúng'}", (255, 255, 255)),
                 (f"Góc: {int(angle or 0)}°", (144, 238, 144)),
-                (f"Đánh giá: {feedback}", form_color),
+                (f"Đánh giá: {feedback}", form_color), # 🛠️ SỬA (FIX 9): Bật lại dòng này
                 (f"FPS: {fps:.1f}", (200, 200, 200)),
             ]
         else:
@@ -314,7 +327,7 @@ def _process_frame_logic(frame_bgr, exercise_type, state_dict, prev_time):
                 (f"Số lần: {counter}", (255, 215, 0)),
                 (f"Trạng thái: {stage_or_good}", (255, 255, 255)),
                 (f"Góc: {int(angle or 0)}°", (144, 238, 144)),
-                (f"Đánh giá: {feedback}", form_color),
+                (f"Đánh giá: {feedback}", form_color), # 🛠️ SỬA (FIX 9): Bật lại dòng này
                 (f"FPS: {fps:.1f}", (200, 200, 200)),
             ]
         annotated = draw_text_pil(annotated, lines, font_path=str(font_path), font_scale=26, pos=(20, 20))
@@ -324,17 +337,40 @@ def _process_frame_logic(frame_bgr, exercise_type, state_dict, prev_time):
 # --- External Webcam Thread (từ code cũ) ---
 
 def external_webcam_loop(exercise, weights):
-    global EXTERNAL_STOP
+    global EXTERNAL_STOP, EXTERNAL_THREAD
     EXTERNAL_STOP.clear()
-    model = get_model(weights) # Warm-up
+    
+    try:
+        model = get_model(weights) # Warm-up
+    except Exception as e:
+        print(f"Lỗi tải model: {e}")
+        return "model_error"
 
-    cap = cv2.VideoCapture(CAP_DEVICE_INDEX)
+    cap = cv2.VideoCapture(CAP_DEVICE_INDEX, cv2.CAP_DSHOW) if os.name=='nt' else cv2.VideoCapture(CAP_DEVICE_INDEX)
     if not cap.isOpened():
-        print("Lỗi mở webcam.")
+        print(f"Lỗi mở webcam index {CAP_DEVICE_INDEX}.")
         return "Lỗi mở webcam."
 
+    # Lấy độ phân giải thực tế
+    ret, sample = cap.read()
+    if not ret:
+        print("Không thể đọc frame từ webcam")
+        cap.release()
+        return "cam_error"
+    
+    actual_h, actual_w = sample.shape[:2]
+    display_w = min(actual_w, DISPLAY_MAX_WIDTH)
+    display_h = int(display_w * (actual_h / actual_w))
+    
+    window_name = "AI Fitness Tracker - Webcam (Nhan 'q' de thoat)"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, display_w, display_h)
+
     prev_time = time.time()
-    frame_idx = 0
+    
+    # 🛠️ SỬA (FIX 7): Khởi tạo frame_idx (đổi từ frame_count)
+    frame_idx = 0 
+    
     last_annotated = None
     state_dict = {k: v["state"].copy() for k, v in EXERCISE_REGISTRY.items()}
     state_dict = reset_state(exercise, state_dict)  # Reset state
@@ -346,19 +382,45 @@ def external_webcam_loop(exercise, weights):
 
         # Đồng bộ với INFER_EVERY_N
         if (frame_idx % INFER_EVERY_N) == 0:
-            annotated, _, state_dict[exercise], fps, prev_time = _process_frame_logic(frame, exercise, state_dict, prev_time)
+            annotated, kps, state_dict[exercise], fps, prev_time = _process_frame_logic(frame, exercise, state_dict, prev_time)
             last_annotated = annotated
+            
+            # 🛠️ SỬA (FIX 7): Thay 'frame_count' thành 'frame_idx'
+            if (frame_idx % 30) == 0: # Log mỗi 30 frames
+                detected_count = 1 if kps is not None else 0
+                print(f"[Webcam] FPS: {fps:.1f} | Detected: {detected_count} | Exercise: {exercise}")
+
         else:
             annotated = last_annotated if last_annotated is not None else frame.copy()
 
-        cv2.imshow("Webcam AI Fitness", annotated)
-        frame_idx += 1
+        # 🛠️ SỬA (FIX 4): Resize frame 640x640 lên kích thước cửa sổ
+        if annotated is not None:
+            display_frame = cv2.resize(annotated, (display_w, display_h), interpolation=cv2.INTER_AREA)
+            cv2.imshow(window_name, display_frame)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        # 🛠️ SỬA (FIX 7): Thay 'frame_count' thành 'frame_idx'
+        frame_idx += 1
+        
+        # Bỏ logic tự động dừng
+        # 🛠️ SỬA (FIX 7): Thay 'frame_count' thành 'frame_idx'
+        # if frame_idx > 300:
+        #     break
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q') or key == 27:
+            EXTERNAL_STOP.set()
             break
+        try:
+            if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
+                EXTERNAL_STOP.set()
+                break
+        except Exception:
+             EXTERNAL_STOP.set()
+             break
 
     cap.release()
     cv2.destroyAllWindows()
+    EXTERNAL_THREAD = None # Thêm dòng này
     return "Webcam stopped."
 
 def start_external_webcam_thread(exercise, weights):
@@ -370,7 +432,7 @@ def start_external_webcam_thread(exercise, weights):
     return "Webcam started (external window)."
 
 def stop_external_webcam_thread():
-    global EXTERNAL_STOP
+    global EXTERNAL_STOP, EXTERNAL_THREAD # Thêm EXTERNAL_THREAD
     EXTERNAL_STOP.set()
     if EXTERNAL_THREAD:
         EXTERNAL_THREAD.join(timeout=5.0)
@@ -379,7 +441,11 @@ def stop_external_webcam_thread():
 # --- Video Processing (chia 3 phần, từ code cũ) ---
 
 def process_video_split_parts(input_path: str, exercise: str, weights: str, output_resolution=(1920, 1080)):
+    global BG_TASK
+    
     if not Path(input_path).exists():
+        BG_TASK["status"] = "error"
+        BG_TASK["error"] = "Input file not found"
         return None, None, None
 
     cap = cv2.VideoCapture(str(input_path))
@@ -391,7 +457,12 @@ def process_video_split_parts(input_path: str, exercise: str, weights: str, outp
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    cap.release() # Đóng lại ngay, sẽ mở lại trong process_range
+    
+    # 🛠️ SỬA: Lấy kích thước gốc của video
+    orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    cap.release()
 
     if total_frames <= 0:
         parts = [(0, None)]
@@ -404,11 +475,19 @@ def process_video_split_parts(input_path: str, exercise: str, weights: str, outp
             parts.append((start, end))
             start = end + 1
 
+    # 🛠️ SỬA: Nếu output_resolution mặc định (1920x1080), 
+    # kiểm tra xem video gốc nhỏ hơn thì dùng kích thước gốc
+    out_w, out_h = output_resolution
+    if orig_w > 0 and orig_h > 0:
+        # Nếu video gốc nhỏ hơn, dùng kích thước gốc (tránh upscale quá nhiều)
+        if orig_w < out_w or orig_h < out_h:
+            out_w, out_h = orig_w, orig_h
+            print(f"[VideoProcess] Dùng kích thước gốc ({out_w}x{out_h}) thay vì ({output_resolution[0]}x{output_resolution[1]})")
+
     tmp_dir = tempfile.mkdtemp(prefix="video_parts_")
     part_paths = [os.path.join(tmp_dir, f"part_{i+1}.mp4") for i in range(len(parts))]
     final_path = os.path.join(tmp_dir, "final_annotated.mp4")
 
-    out_w, out_h = output_resolution
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
     def process_range(start_frame, end_frame, out_path):
@@ -418,15 +497,14 @@ def process_video_split_parts(input_path: str, exercise: str, weights: str, outp
         
         # Khởi tạo state cho process_range
         local_state = {k: v["state"].copy() for k, v in EXERCISE_REGISTRY.items()}
-        local_state = reset_state(exercise, local_state)  # Reset state
+        local_state = reset_state(exercise, local_state)
         prev_time = time.time()
         
         frame_idx = start_frame
         last_log_time = time.time()
         
-        last_annotated_canvas = None # Cache cho video
+        last_annotated_canvas = None
 
-        # === BẮT ĐẦU VÒNG LẶP ĐÃ SỬA LỖI ===
         while True:
             if end_frame is not None and frame_idx > end_frame:
                 break
@@ -434,77 +512,62 @@ def process_video_split_parts(input_path: str, exercise: str, weights: str, outp
             if not ret:
                 break
             
-            # === CẬP NHẬT: Đồng bộ logic INFER_EVERY_N ===
             annotated = None
             if (frame_idx % INFER_EVERY_N) == 0:
                 try:
-                    # 1. Xử lý frame, 
-                    # 🛠️ SỬA (FIX 4): 'annotated_orig_size' bây giờ là 640x640
-                    annotated_orig_size, kps, local_state, _, prev_time = _process_frame_logic(
+                    annotated_orig_size, kps, local_state[exercise], _, prev_time = _process_frame_logic(
                         frame, exercise, local_state, prev_time
                     )
                     
-                    # === SỬA LỖI GIỮ KHUNG HÌNH GỐC (LETTERBOX/PILLARBOX) ===
-                    
-                    # 🛠️ SỬA (FIX 4): Kích thước vào là 640x640
-                    in_h, in_w = annotated_orig_size.shape[:2] # (640, 640)
-
-                    # 2. Tính toán tỉ lệ (scale) để giữ nguyên aspect ratio
+                    # 🛠️ SỬA: Giữ tỉ lệ bằng letterbox (không kéo giãn)
+                    in_h, in_w = annotated_orig_size.shape[:2]
                     scale = min(out_w / in_w, out_h / in_h)
                     new_w = int(in_w * scale)
                     new_h = int(in_h * scale)
 
-                    # 3. Resize frame về kích thước mới (vẫn giữ tỉ lệ)
                     resized_frame = cv2.resize(annotated_orig_size, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-                    # 4. Tạo canvas đen (kích thước output)
+                    # Canvas với màu đen (hoặc có thể dùng màu khác)
                     canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
 
-                    # 5. Tính toán vị trí paste (để căn giữa)
+                    # Căn giữa frame trên canvas
                     x_offset = (out_w - new_w) // 2
                     y_offset = (out_h - new_h) // 2
 
-                    # 6. Paste frame đã resize vào canvas
                     canvas[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized_frame
                     
-                    annotated = canvas # Frame cuối cùng để ghi là canvas
-                    last_annotated_canvas = annotated # Cache lại
-                    # === KẾT THÚC SỬA LỖI ===
+                    annotated = canvas
+                    last_annotated_canvas = annotated
 
                 except Exception as e:
                     print(f"Lỗi xử lý frame {frame_idx}: {e}")
-                    # Fallback: Vẫn tạo canvas đen và resize (có thể bị méo)
+                    traceback.print_exc()
                     try:
-                        # 🛠️ SỬA (FIX 4): Resize frame 640x640 bị lỗi
                         if 'annotated_orig_size' in locals():
-                             annotated = cv2.resize(annotated_orig_size, (out_w, out_h), interpolation=cv2.INTER_AREA)
+                            annotated = cv2.resize(annotated_orig_size, (out_w, out_h), interpolation=cv2.INTER_AREA)
                         else:
-                             annotated = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
+                            annotated = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
                     except Exception:
-                        annotated = np.zeros((out_h, out_w, 3), dtype=np.uint8) # Fallback cuối
+                        annotated = np.zeros((out_h, out_w, 3), dtype=np.uint8)
                     last_annotated_canvas = annotated
             else:
-                # Dùng frame đã cache
                 annotated = last_annotated_canvas
 
-            if annotated is None: # Xử lý frame đầu tiên
+            if annotated is None:
                 annotated = np.zeros((out_h, out_w, 3), dtype=np.uint8)
                 
-            # Đảm bảo đúng dtype (không cần check size nữa vì đã tạo canvas)
             annotated = np.ascontiguousarray(annotated, dtype=np.uint8)
             
             try:
-                writer.write(annotated) # Frame đã là BGR
+                writer.write(annotated)
             except Exception as e:
                 print(f"Lỗi ghi frame {frame_idx}: {e} shape={annotated.shape} dtype={annotated.dtype}")
             
             frame_idx += 1
             
-            # Log ra terminal (logic từ code mới)
             if time.time() - last_log_time > 5.0:
                 print(f"[VideoProcess] Đã xử lý {frame_idx} frames... (Đang ở part: {out_path})")
                 last_log_time = time.time()
-        # === KẾT THÚC VÒNG LẶP ===
 
         cap_local.release()
         writer.release()
@@ -523,11 +586,10 @@ def process_video_split_parts(input_path: str, exercise: str, weights: str, outp
         print("[VideoProcess] Bắt đầu xử lý Part 2 & 3 (background)...")
         try:
             for i in range(1, len(parts)):
-                s,e = parts[i]
+                s, e = parts[i]
                 process_range(s, e, part_paths[i])
             
             print("[VideoProcess] Đang nối các part...")
-            # Nối các part lại
             out = cv2.VideoWriter(final_path, fourcc, fps, (out_w, out_h))
             for p in part_paths:
                 cap_p = cv2.VideoCapture(p)
@@ -535,7 +597,6 @@ def process_video_split_parts(input_path: str, exercise: str, weights: str, outp
                     ret, frm = cap_p.read()
                     if not ret:
                         break
-                    # (Không cần resize/pad nữa vì process_range đã xử lý)
                     frm = np.ascontiguousarray(frm, dtype=np.uint8)
                     out.write(frm)
                 cap_p.release()
@@ -585,7 +646,7 @@ def analyze_video_click(uploaded_file, exercise, weights, resolution):
     
     if part1 is None:
         BG_TASK["status"] = "error"
-        return None, "Xử lý thất bại (lỗi model/load video)."
+        return None, f"Xử lý thất bại. Lỗi: {BG_TASK.get('error', 'Không rõ')}"
         
     return part1, f"Part 1 đã sẵn sàng. Đang xử lý các phần còn lại... (tmp: {tmpd}). Dùng 'Xem Video (final)' để kiểm tra."
 
@@ -602,9 +663,12 @@ def view_remaining_click():
 
 # Thêm cleanup
 def cleanup():
-    if BG_TASK["tmp_dir"] and os.path.exists(BG_TASK["tmp_dir"]):
-        shutil.rmtree(BG_TASK["tmp_dir"])
-        print("Cleaned up temp dir.")
+    if BG_TASK.get("tmp_dir") and os.path.exists(BG_TASK["tmp_dir"]):
+        try:
+            shutil.rmtree(BG_TASK["tmp_dir"])
+            print(f"Cleaned up temp dir: {BG_TASK['tmp_dir']}")
+        except Exception as e:
+            print(f"Error cleaning up temp dir: {e}")
 
 atexit.register(cleanup)
 
@@ -638,12 +702,17 @@ def build_ui():
         gr.Markdown("### 📁 Phân tích Video (Chia 3 phần)")
         with gr.Row():
             upload = gr.File(label="Tải video file (.mp4, .mov)")
-            res_choice = gr.Dropdown(DEFAULT_RES_OPTIONS, value="1280x720", label="Độ phân giải đầu ra")
+            # 🛠️ SỬA (FIX 6): Đặt giá trị mặc định là 1080p (1920x1080)
+            res_choice = gr.Dropdown(DEFAULT_RES_OPTIONS, value="1920x1080", label="Độ phân giải đầu ra")
         with gr.Row():
             analyze_btn = gr.Button("🎬 Phân tích Video (Part 1)")
             view_btn = gr.Button("🍿 Xem Video (final)")
             
-        out_video = gr.Video(label="Video kết quả (part 1 hoặc final)")
+        out_video = gr.Video(
+            label="Video kết quả (part 1 hoặc final)",
+            scale=1,  # Cho phép tự điều chỉnh theo tỉ lệ gốc
+            format="mp4"
+        )
         message = gr.Textbox(label="Trạng thái Video", value="", interactive=False)
 
         analyze_btn.click(fn=analyze_video_click, inputs=[upload, exercise, weights_input, res_choice], outputs=[out_video, message])

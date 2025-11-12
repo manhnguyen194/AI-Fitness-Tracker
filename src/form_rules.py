@@ -10,15 +10,13 @@ from utils.feedback_utils import AIFeedbackManager
 # ======================
 feedback_manager = AIFeedbackManager(cooldown=2.0)
 
-form_memory = {
-    "lowest_angle": None,
-    "rep_active": False,
-}
+# ❌ ĐÃ XÓA BIẾN GLOBAL 'form_memory' ❌
+# (Logic sẽ được chuyển vào 'state' dict)
 
 # ======================
 # 🏋️‍♂️ Squat Evaluation
 # ======================
-def evaluate_squat(keypoints, frame=None, stage=None, counter=None):
+def evaluate_squat(keypoints, state, frame=None, stage=None, counter=None): # 🛠️ THÊM 'state'
     left_hip, left_knee, left_ankle = keypoints[11], keypoints[13], keypoints[15]
     right_hip, right_knee, right_ankle = keypoints[12], keypoints[14], keypoints[16]
     left_shoulder, right_shoulder = keypoints[5], keypoints[6]
@@ -32,12 +30,12 @@ def evaluate_squat(keypoints, frame=None, stage=None, counter=None):
     ok_color, warn_color, err_color = (0, 255, 0), (0, 255, 255), (0, 0, 255)
 
     if stage == "down":
-        form_memory["rep_active"] = True
-        if form_memory["lowest_angle"] is None or mean_angle < form_memory["lowest_angle"]:
-            form_memory["lowest_angle"] = mean_angle
+        state["rep_active"] = True # 🛠️ SỬA: Dùng 'state'
+        if state.get("lowest_angle") is None or mean_angle < state.get("lowest_angle", 180): # Thêm 180 làm default
+            state["lowest_angle"] = mean_angle # 🛠️ SỬA: Dùng 'state'
 
-    if stage == "up" and form_memory["rep_active"]:
-        lowest_angle = form_memory["lowest_angle"] or mean_angle
+    if stage == "up" and state.get("rep_active", False): # 🛠️ SỬA: Dùng 'state'
+        lowest_angle = state.get("lowest_angle", mean_angle) # 🛠️ SỬA: Dùng 'state'
 
         if lowest_angle > 130:
             issues.append("Cần hạ thấp hơn ở lần sau.")
@@ -54,8 +52,8 @@ def evaluate_squat(keypoints, frame=None, stage=None, counter=None):
                 draw_colored_line(frame, left_shoulder, left_hip, warn_color)
 
         feedback, tone = feedback_manager.get_feedback("squat", score, issues)
-        form_memory["rep_active"] = False
-        form_memory["lowest_angle"] = None
+        state["rep_active"] = False # 🛠️ SỬA: Dùng 'state'
+        state["lowest_angle"] = None # 🛠️ SỬA: Dùng 'state'
         return score, feedback, tone
 
     return 100, feedback_manager.last_feedback, "neutral"
@@ -64,7 +62,7 @@ def evaluate_squat(keypoints, frame=None, stage=None, counter=None):
 # ======================
 # 🤸‍♀️ Push-up Evaluation
 # ======================
-def evaluate_pushup(keypoints, frame=None, stage=None, counter=None):
+def evaluate_pushup(keypoints, state, frame=None, stage=None, counter=None): # 🛠️ THÊM 'state'
     left_shoulder, left_elbow, left_wrist = keypoints[5], keypoints[7], keypoints[9]
     right_shoulder, right_elbow, right_wrist = keypoints[6], keypoints[8], keypoints[10]
     left_hip, right_hip = keypoints[11], keypoints[12]
@@ -77,12 +75,12 @@ def evaluate_pushup(keypoints, frame=None, stage=None, counter=None):
     ok_color, warn_color, err_color = (0, 255, 0), (0, 255, 255), (0, 0, 255)
 
     if stage == "down":
-        form_memory["rep_active"] = True
-        if form_memory["lowest_angle"] is None or mean_angle < form_memory["lowest_angle"]:
-            form_memory["lowest_angle"] = mean_angle
+        state["rep_active"] = True # 🛠️ SỬA: Dùng 'state'
+        if state.get("lowest_angle") is None or mean_angle < state.get("lowest_angle", 180): # Thêm 180 làm default
+            state["lowest_angle"] = mean_angle # 🛠️ SỬA: Dùng 'state'
 
-    if stage == "up" and form_memory["rep_active"]:
-        lowest_angle = form_memory["lowest_angle"] or mean_angle
+    if stage == "up" and state.get("rep_active", False): # 🛠️ SỬA: Dùng 'state'
+        lowest_angle = state.get("lowest_angle", mean_angle) # 🛠️ SỬA: Dùng 'state'
 
         if lowest_angle > 100:
             issues.append("Chưa hạ người đủ sâu.")
@@ -97,8 +95,8 @@ def evaluate_pushup(keypoints, frame=None, stage=None, counter=None):
                 draw_colored_line(frame, left_hip, left_shoulder, warn_color)
 
         feedback, tone = feedback_manager.get_feedback("pushup", score, issues)
-        form_memory["rep_active"] = False
-        form_memory["lowest_angle"] = None
+        state["rep_active"] = False # 🛠️ SỬA: Dùng 'state'
+        state["lowest_angle"] = None # 🛠️ SỬA: Dùng 'state'
         return score, feedback, tone
 
     return 100, feedback_manager.last_feedback, "neutral"
@@ -107,7 +105,7 @@ def evaluate_pushup(keypoints, frame=None, stage=None, counter=None):
 # ======================
 # 🧍‍♀️ Plank Evaluation
 # ======================
-def evaluate_plank(keypoints, frame=None, stage=None, counter=None):
+def evaluate_plank(keypoints, state, frame=None, stage=None, counter=None): # 🛠️ THÊM 'state'
     left_shoulder, left_hip, left_ankle = keypoints[5], keypoints[11], keypoints[15]
     angle = calculate_angle(left_shoulder, left_hip, left_ankle)
 
@@ -133,7 +131,7 @@ def evaluate_plank(keypoints, frame=None, stage=None, counter=None):
 # ======================
 # 🪶 Sit-up Evaluation
 # ======================
-def evaluate_situp(keypoints, frame=None, stage=None, counter=None):
+def evaluate_situp(keypoints, state, frame=None, stage=None, counter=None): # 🛠️ THÊM 'state'
     """
     Đánh giá động tác Sit-up:
     - Kiểm tra độ sâu khi gập người (vai – hông – gối)
@@ -156,13 +154,13 @@ def evaluate_situp(keypoints, frame=None, stage=None, counter=None):
 
     # Ghi nhận độ sâu khi đang xuống
     if stage == "down":
-        form_memory["rep_active"] = True
-        if (form_memory.get("lowest_angle") is None) or (mean_angle < form_memory["lowest_angle"]):
-            form_memory["lowest_angle"] = mean_angle
+        state["rep_active"] = True # 🛠️ SỬA: Dùng 'state'
+        if (state.get("lowest_angle") is None) or (mean_angle < state.get("lowest_angle", 180)): # Thêm 180 làm default
+            state["lowest_angle"] = mean_angle # 🛠️ SỬA: Dùng 'state'
 
     # Khi vừa ngồi dậy (stage == "up")
-    if stage == "up" and form_memory.get("rep_active", False):
-        lowest_angle = form_memory.get("lowest_angle", mean_angle)
+    if stage == "up" and state.get("rep_active", False): # 🛠️ SỬA: Dùng 'state'
+        lowest_angle = state.get("lowest_angle", mean_angle) # 🛠️ SỬA: Dùng 'state'
 
         # 1️⃣ Độ sâu: gập chưa đủ
         if lowest_angle > 130:
@@ -189,8 +187,8 @@ def evaluate_situp(keypoints, frame=None, stage=None, counter=None):
         feedback, tone = feedback_manager.get_feedback("situp", score, issues)
 
         # Reset trạng thái cho rep tiếp theo
-        form_memory["rep_active"] = False
-        form_memory["lowest_angle"] = None
+        state["rep_active"] = False # 🛠️ SỬA: Dùng 'state'
+        state["lowest_angle"] = None # 🛠️ SỬA: Dùng 'state'
 
         return score, feedback, tone
 
@@ -200,13 +198,66 @@ def evaluate_situp(keypoints, frame=None, stage=None, counter=None):
 # ======================
 #  dispatcher
 # ======================
-def evaluate_form_feedback(exercise_type, keypoints, frame=None, stage=None, counter=None):
-    if exercise_type == "squat":
-        return evaluate_squat(keypoints, frame, stage, counter)
-    elif exercise_type == "pushup":
-        return evaluate_pushup(keypoints, frame, stage, counter)
-    elif exercise_type == "plank":
-        return evaluate_plank(keypoints, frame, stage, counter)
-    elif exercise_type == "situp":
-        return evaluate_situp(keypoints, frame, stage, counter)
+def evaluate_form_feedback(exercise_type, *args, **kwargs):
+    """
+    Flexible dispatcher for form evaluation.
+    Supports calls in either form:
+      - evaluate_form_feedback(exercise_type, keypoints, state, frame=None, stage=None, counter=None)
+      - evaluate_form_feedback(exercise_type, keypoints, frame=None, stage=None, counter=None)  # state absent
+      - evaluate_form_feedback(exercise_type, keypoints, state_dict)  # minimal
+
+    Normalizes args and calls the per-exercise evaluate_* functions which all expect:
+      evaluate_<exercise>(keypoints, state, frame=None, stage=None, counter=None)
+    """
+    # normalize exercise_type
+    et = str(exercise_type).lower() if exercise_type is not None else ""
+
+    # parse positional args
+    keypoints = None
+    state = None
+    frame = None
+    stage = None
+    counter = None
+
+    if len(args) >= 1:
+        keypoints = args[0]
+    if len(args) >= 2:
+        # could be state or frame depending on caller
+        if isinstance(args[1], dict):
+            state = args[1]
+            if len(args) >= 3:
+                frame = args[2]
+            if len(args) >= 4:
+                stage = args[3]
+            if len(args) >= 5:
+                counter = args[4]
+        else:
+            # assume legacy: args[1] is frame
+            frame = args[1]
+            if len(args) >= 3:
+                stage = args[2]
+            if len(args) >= 4:
+                counter = args[3]
+
+    # kwargs override / fill
+    state = kwargs.get("state", state)
+    frame = kwargs.get("frame", frame)
+    stage = kwargs.get("stage", stage)
+    counter = kwargs.get("counter", counter)
+
+    # ensure state is at least a dict
+    if state is None:
+        state = {}
+
+    # dispatch mapping
+    if et in ("squat", "squats"):
+        return evaluate_squat(keypoints, state, frame, stage, counter)
+    elif et in ("pushup", "push-up", "push ups", "push-ups", "pushups"):
+        return evaluate_pushup(keypoints, state, frame, stage, counter)
+    elif et in ("plank", "planks"):
+        return evaluate_plank(keypoints, state, frame, stage, counter)
+    elif et in ("situp", "sit-up", "situps", "sit-ups"):
+        return evaluate_situp(keypoints, state, frame, stage, counter)
+
+    # fallback: try calling evaluate_squat style by default
     return 100, "Unknown exercise type", "neutral"

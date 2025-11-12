@@ -16,8 +16,6 @@ from form_rules import (
     evaluate_squat, evaluate_pushup, evaluate_plank, evaluate_situp
 )
 
-import voice_player
-
 # -----------------------------
 # ⚙️ Cấu hình
 # -----------------------------
@@ -28,24 +26,29 @@ USE_WEBCAM = True      # Đổi True/False để chọn nguồn
 WEBCAM_INDEX = 0       # Chỉ số webcam (mặc định 0)
 
 # Đường dẫn video dùng khi USE_WEBCAM = False
-VIDEO_REL = os.path.join("data", "raw", "pushup_ok_01.mp4")
-# file data/ nằm bên trong src/, không phải ở project root -> không cần ".."
-VIDEO_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), VIDEO_REL))
+from pathlib import Path
+VIDEO_REL = Path("data") / "raw" / "pushup_ok_01.mp4"
+VIDEO_PATH = Path(__file__).parent / VIDEO_REL
+if not VIDEO_PATH.exists():
+    print(f"Warning: Video not found at {VIDEO_PATH}, fallback to webcam.")
 
 # Xác định nguồn cho VideoCapture
 if USE_WEBCAM:
     CAP_SOURCE = WEBCAM_INDEX
     print(f"▶️ Nguồn: Webcam({WEBCAM_INDEX})")
 else:
-    if not os.path.exists(VIDEO_PATH):
+    if not VIDEO_PATH.exists():
         print(f"❌ Video không tìm thấy tại: {VIDEO_PATH}")
         print(f"➜ Tự động chuyển sang webcam ({WEBCAM_INDEX}).")
         CAP_SOURCE = WEBCAM_INDEX
     else:
-        CAP_SOURCE = VIDEO_PATH
+        CAP_SOURCE = str(VIDEO_PATH)
         print(f"▶️ Nguồn: Video → {VIDEO_PATH}")
 
-FONT_PATH = os.path.join(os.path.dirname(__file__), "..", "fonts", "Roboto.ttf")
+FONT_PATH = Path(__file__).parent.parent / "fonts" / "Roboto.ttf"
+if not FONT_PATH.exists():
+    print("Warning: Font not found, fallback to system font.")
+    FONT_PATH = "arial.ttf"  # Hoặc None nếu cần
 
 # Add/modify these configurations at the top
 BATCH_SIZE = 1
@@ -84,10 +87,10 @@ model = YOLO("yolo11n-pose.pt")
 model.conf = CONF_THRESHOLD
 model.to(device)
 
-cap = cv2.VideoCapture(VIDEO_PATH)
+cap = cv2.VideoCapture(CAP_SOURCE)
 
 if not cap.isOpened():
-    print("❌ Không thể mở video hoặc webcam:", VIDEO_PATH)
+    print("❌ Không thể mở nguồn capture:", CAP_SOURCE)
     exit()
 print("▶️ Bắt đầu. Nhấn 'q' để thoát.")
 
@@ -128,31 +131,13 @@ counter_func = exercise_registry[EXERCISE]["counter_func"]
 form_func = exercise_registry[EXERCISE]["form_func"]
 state = exercise_registry[EXERCISE]["state"]
 
-
-# --- Voice player init ---
-# Build the path dynamically relative to the current script
-BASE_DIR = os.path.dirname(__file__)  # folder containing this file (e.g. src/)
-VOICES_DIR = os.path.join(BASE_DIR, "data", "voices")
-
-voice_player.init(VOICES_DIR, interval=10.0)
-
-
-# dùng explicit mapping để chắc chắn.
-explicit = {
-    "positive": "positive_voice_pcm.wav",
-    "neutral":  "neutral_voice_pcm.wav",
-    "negative": "negative_voice_pcm.wav",
-}
-# ------------------------------------------------
-
-
-
 # -----------------------------
 # 🔁 Vòng lặp chính
 # -----------------------------
 prev_time = time.time()
 frame_idx = 0
 last_annotated = None  # cache frame có skeleton để tránh nhấp nháy
+
 while True:
 
     ret, frame = cap.read()
@@ -176,28 +161,23 @@ while True:
     else:
         annotated = last_annotated if last_annotated is not None else frame.copy()
 
+    # Khởi tạo default để tránh UnboundLocalError
     counter = 0
     stage = "up"
     angle = 0
-    feedback = "..."
+    feedback = "Không phát hiện người"
+    form_color = (255, 255, 255)
 
     # Nếu có keypoints → xử lý
     if res.keypoints is not None and len(res.keypoints.xy) > 0:
         kps = res.keypoints.xy[0].tolist()
 
-    # Gọi hàm đếm và đánh giá form tương ứng bài tập
+        # Gọi hàm đếm và đánh giá form tương ứng bài tập
         counter, stage, angle = counter_func(kps, state)
         form_score, feedback, tone = form_func(kps, annotated, stage, counter)
-        # Cập nhật voice player với tone hiện tại
-        # tone được thiết kế bởi feedback_utils: "positive"|"neutral"|"negative"
-        # voice_player sẽ tìm file tương ứng trong VOICES_DIR (explicit mapping)
-        voice_player.set_tone(tone)
 
-    # 💡 Thêm dòng này
+        # 💡 Thêm dòng này
         form_color = (0, 255, 0) if tone == "good" else (0, 0, 255)
-    else:
-        form_color = (255, 255, 255)
-        feedback = "Không phát hiện người"
 
     # -----------------------------
     # 🧮 Tính FPS
@@ -226,7 +206,7 @@ while True:
             (f"FPS: {fps:.1f}", (200, 200, 200)),
         ]
 
-    annotated = draw_text_pil(annotated, lines, font_path=FONT_PATH, font_scale=26, pos=(20, 20))
+    annotated = draw_text_pil(annotated, lines, font_path=str(FONT_PATH), font_scale=26, pos=(20, 20))
 
     # -----------------------------
     # 🖥️ Hiển thị video auto-scale
@@ -242,6 +222,3 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
-
-# Dừng voice player an toàn
-voice_player.stop()
