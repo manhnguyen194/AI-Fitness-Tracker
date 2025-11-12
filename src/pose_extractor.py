@@ -21,8 +21,8 @@ import voice_player
 # -----------------------------
 # ⚙️ Cấu hình
 # -----------------------------
-EXERCISE =  "plank" # hoặc "squat"
-VIDEO_REL = os.path.join("data", "raw", "plank_ok_01.mp4")
+EXERCISE =  "pushup" # hoặc "squat"
+VIDEO_REL = os.path.join("data", "raw", "pushup_ok_01.mp4")
 
 # file data/ nằm bên trong src/, không phải ở project root -> không cần ".."
 VIDEO_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), VIDEO_REL))
