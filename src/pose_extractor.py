@@ -134,15 +134,13 @@ state = exercise_registry[EXERCISE]["state"]
 BASE_DIR = os.path.dirname(__file__)  # folder containing this file (e.g. src/)
 VOICES_DIR = os.path.join(BASE_DIR, "data", "voices")
 
-voice_player.init(VOICES_DIR, interval=10.0)
+# phát welcome.mp3 → đợi 2s → lần đầu theo tone là 5s, sau đó giữ nguyên tone thì 4s
+voice_player.init(VOICES_DIR, base_interval_first=6.0, base_interval_same=5.0)
 
+# --- Voice player init (periodic-only) ---
 
-# dùng explicit mapping để chắc chắn.
-explicit = {
-    "positive": "positive_voice_pcm.wav",
-    "neutral":  "neutral_voice_pcm.wav",
-    "negative": "negative_voice_pcm.wav",
-}
+# Khởi tạo periodic player: mỗi 3 giây đọc tone hiện tại và phát
+voice_player.init(VOICES_DIR, base_interval_first=10.0, base_interval_same=10.0)
 # ------------------------------------------------
 
 
