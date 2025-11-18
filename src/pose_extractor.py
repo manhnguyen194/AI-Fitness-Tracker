@@ -24,11 +24,11 @@ import voice_player
 EXERCISE =  "pushup"  # hoặc "squat", "plank", "situp"
 
 # Chọn nguồn vào: webcam hay video
-USE_WEBCAM = True      # Đổi True/False để chọn nguồn
+USE_WEBCAM = False      # Đổi True/False để chọn nguồn
 WEBCAM_INDEX = 0       # Chỉ số webcam (mặc định 0)
 
 # Đường dẫn video dùng khi USE_WEBCAM = False
-VIDEO_REL = os.path.join("data", "raw", "pushup_ok_01.mp4")
+VIDEO_REL = os.path.join("../data", "raw", "pushup_ok_01.mp4")
 # file data/ nằm bên trong src/, không phải ở project root -> không cần ".."
 VIDEO_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), VIDEO_REL))
 
@@ -51,7 +51,7 @@ FONT_PATH = os.path.join(os.path.dirname(__file__), "..", "fonts", "Roboto.ttf")
 BATCH_SIZE = 1
 IMG_SIZE = 640  # or 480 for faster processing
 DRAW_EVERY_N_FRAMES = 3  # Increase to 3 or 4 for higher FPS
-
+INFERENCE_EVERY = 3  # chạy model.predict mỗi N frames (giảm inference)
 # Thêm cấu hình sau phần CONFIG
 CONF_THRESHOLD = 0.5     # Lọc bớt detection có độ tin cậy thấp
 
@@ -76,13 +76,21 @@ print("=====================\n")
 if device.startswith("cuda"):
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = False
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    # allow_tf32 attributes may not exist on some torch versions; guard with try
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    except Exception:
+        pass
 
 # Modify model initialization
 model = YOLO("yolo11n-pose.pt")
 model.conf = CONF_THRESHOLD
-model.to(device)
+try:
+    model.to(device)
+except Exception:
+    # some ultralytics versions auto-handle device; ignore if .to() fails
+    pass
 
 cap = cv2.VideoCapture(VIDEO_PATH)
 
@@ -150,49 +158,87 @@ voice_player.init(VOICES_DIR, base_interval_first=10.0, base_interval_same=10.0)
 # -----------------------------
 prev_time = time.time()
 frame_idx = 0
-last_annotated = None  # cache frame có skeleton để tránh nhấp nháy
+last_annotated = None     # cache frame đã vẽ skeleton/annotation
+last_results = None       # cache kết quả model (ultralytics 'result' object)
+last_kps = None           # cache keypoints list để reuse cho rep counter
 while True:
-
     ret, frame = cap.read()
     if not ret:
         print("🎬 Hết video hoặc lỗi đọc frame.")
         break
-    frame = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
+    # Resize frame for consistent input size (trade-off: smaller -> faster)
+    frame_resized = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
 
-    # Use model.predict instead of direct call for better GPU utilization
-    results = model.predict(frame, 
-                       verbose=False,
-                       conf=CONF_THRESHOLD,
-                       device=device,
-                       batch=BATCH_SIZE)
-    res = results[0]
-    
-    # Chỉ vẽ annotation mỗi N frame; khung xen kẽ tái sử dụng ảnh đã vẽ trước đó để tránh nhấp nháy
-    if frame_idx % DRAW_EVERY_N_FRAMES == 0:
-        annotated = res.plot()
-        last_annotated = annotated
+    # --- Chỉ chạy inference mỗi INFERENCE_EVERY frames ---
+    do_inference = (frame_idx % INFERENCE_EVERY == 0)
+
+    if do_inference:
+        try:
+            results = model.predict(frame_resized,
+                                    verbose=False,
+                                    conf=CONF_THRESHOLD,
+                                    device=device,
+                                    batch=BATCH_SIZE)
+            # results returned as list-like; lấy phần tử đầu
+            res = results[0] if results and len(results) > 0 else None
+            last_results = res
+        except Exception as e:
+            # Trong trường hợp predict lỗi, giữ last_results (nếu có)
+            print("⚠️ Lỗi khi predict:", e)
+            res = last_results
     else:
-        annotated = last_annotated if last_annotated is not None else frame.copy()
+        # reuse last inference result
+        res = last_results
+
+    # -----------------------------
+    # Chỉ vẽ annotation mỗi DRAW_EVERY_N_FRAMES; reuse ảnh đã vẽ nếu có
+    # -----------------------------
+    if frame_idx % DRAW_EVERY_N_FRAMES == 0 and res is not None:
+        try:
+            annotated = res.plot()  # ultralytics result.plot()
+            last_annotated = annotated
+        except Exception:
+            # nếu res.plot() fail, fallback to drawing on resized frame
+            annotated = frame_resized.copy()
+            last_annotated = annotated
+    else:
+        # reuse last annotated image nếu có, else dùng resized frame
+        annotated = last_annotated if last_annotated is not None else frame_resized.copy()
 
     counter = 0
     stage = "up"
     angle = 0
     feedback = "..."
 
-    # Nếu có keypoints → xử lý
-    if res.keypoints is not None and len(res.keypoints.xy) > 0:
-        kps = res.keypoints.xy[0].tolist()
+    # Nếu có keypoints → xử lý (dùng last_results nếu không predict frame này)
+    if res is not None and getattr(res, "keypoints", None) is not None:
+        try:
+            # res.keypoints.xy có thể trả về mảng Nx( ... ), lấy bộ đầu tiên nếu có nhiều người
+            kps_arr = res.keypoints.xy
+            if kps_arr is not None and len(kps_arr) > 0:
+                kps = kps_arr[0].tolist()
+                last_kps = kps
+            else:
+                # không có keypoints trong kết quả hiện tại → fallback dùng last_kps
+                kps = last_kps
+        except Exception:
+            kps = last_kps
+    else:
+        kps = last_kps
 
-    # Gọi hàm đếm và đánh giá form tương ứng bài tập
-        counter, stage, angle = counter_func(kps, state)
-        form_score, feedback, tone = form_func(kps, annotated, stage, counter)
-        # Cập nhật voice player với tone hiện tại
-        # tone được thiết kế bởi feedback_utils: "positive"|"neutral"|"negative"
-        # voice_player sẽ tìm file tương ứng trong VOICES_DIR (explicit mapping)
-        voice_player.set_tone(tone)
-
-    # 💡 Thêm dòng này
-        form_color = (0, 255, 0) if tone == "good" else (0, 0, 255)
+    if kps is not None:
+        # Gọi hàm đếm và đánh giá form tương ứng bài tập
+        try:
+            counter, stage, angle = counter_func(kps, state)
+            form_score, feedback, tone = form_func(kps, annotated, stage, counter)
+            # Cập nhật voice player với tone hiện tại (tone mapping do bạn design)
+            voice_player.set_tone(tone)
+            form_color = (0, 255, 0) if tone == "good" else (0, 0, 255)
+        except Exception as e:
+            # in ra lỗi xử lý rep/form nhưng không crash vòng lặp
+            print("⚠️ Lỗi xử lý rep/form:", e)
+            form_color = (255, 255, 255)
+            feedback = "Lỗi xử lý"
     else:
         form_color = (255, 255, 255)
         feedback = "Không phát hiện người"
@@ -240,6 +286,4 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
-
-# Dừng voice player an toàn
 voice_player.stop()
