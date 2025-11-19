@@ -2,288 +2,281 @@ import os
 import cv2
 import time
 import torch
+import contextlib
+import io
 from ultralytics import YOLO
 
-# -----------------------------
-# 📦 Import module hỗ trợ
-# -----------------------------
+# Import các module hỗ trợ
 from utils.draw_utils import draw_text_pil
-from utils.video_utils import setup_window, compute_fps
-from rep_counter import (
-    count_squat, count_pushup, count_plank, count_situp
-)
-from form_rules import (
-    evaluate_squat, evaluate_pushup, evaluate_plank, evaluate_situp
-)
-
+from utils.video_utils import compute_fps
+from rep_counter import count_squat, count_pushup, count_plank, count_situp
+from form_rules import evaluate_squat, evaluate_pushup, evaluate_plank, evaluate_situp
 import voice_player
 
-# -----------------------------
-# ⚙️ Cấu hình
-# -----------------------------
-EXERCISE =  "pushup"  # hoặc "squat", "plank", "situp"
 
-# Chọn nguồn vào: webcam hay video
-USE_WEBCAM = False      # Đổi True/False để chọn nguồn
-WEBCAM_INDEX = 0       # Chỉ số webcam (mặc định 0)
+class FitnessTracker:
+    def __init__(
+            self,
+            exercise="squat",
+            data_dir="data",
+            fonts_dir="fonts",
+            voices_dir="data/voices",
+            img_size=640,
+            inference_every=3,
+            draw_every=3,
+            conf=0.5
+    ):
+        self.exercise = exercise
+        self.img_size = img_size
+        self.inference_every = inference_every
+        self.draw_every = draw_every
+        self.conf = conf
 
-# Đường dẫn video dùng khi USE_WEBCAM = False
-VIDEO_REL = os.path.join("../data", "raw", "pushup_ok_01.mp4")
-# file data/ nằm bên trong src/, không phải ở project root -> không cần ".."
-VIDEO_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), VIDEO_REL))
+        # --- Paths ---
+        self.exercise = self.exercise.lower().replace('-', '')
+        self.voices_dir = voices_dir
+        self.font_path = os.path.join(fonts_dir, "Roboto.ttf")
 
-# Xác định nguồn cho VideoCapture
-if USE_WEBCAM:
-    CAP_SOURCE = WEBCAM_INDEX
-    print(f"▶️ Nguồn: Webcam({WEBCAM_INDEX})")
-else:
-    if not os.path.exists(VIDEO_PATH):
-        print(f"❌ Video không tìm thấy tại: {VIDEO_PATH}")
-        print(f"➜ Tự động chuyển sang webcam ({WEBCAM_INDEX}).")
-        CAP_SOURCE = WEBCAM_INDEX
-    else:
-        CAP_SOURCE = VIDEO_PATH
-        print(f"▶️ Nguồn: Video → {VIDEO_PATH}")
+        # --- Register exercises ---
+        self.exercise_registry = {
+            "squat": {
+                "counter_func": count_squat,
+                "form_func": evaluate_squat,
+                "state": {"stage": "up", "counter": 0, "prev_angle": 160, "direction": "up", "active_frames": 0},
+            },
+            "pushup": {
+                "counter_func": count_pushup,
+                "form_func": evaluate_pushup,
+                "state": {"stage": "up", "counter": 0, "prev_angle": 160, "direction": "up", "active_frames": 0},
+            },
+            "plank": {
+                "counter_func": count_plank,
+                "form_func": evaluate_plank,
+                "state": {"good_time": 0, "bad_time": 0, "is_good": False, "start_time": None, "elapsed": 0.0,
+                          "active_frames": 0, "last_time": None},  # Thêm last_time vào init
+            },
+            "situp": {
+                "counter_func": count_situp,
+                "form_func": evaluate_situp,
+                "state": {"stage": "down", "counter": 0, "prev_angle": 140, "direction": "down", "active_frames": 0},
+            },
+        }
 
-FONT_PATH = os.path.join(os.path.dirname(__file__), "..", "fonts", "Roboto.ttf")
+        if self.exercise not in self.exercise_registry:
+            raise ValueError(f"Exercise '{self.exercise}' not supported.")
 
-# Add/modify these configurations at the top
-BATCH_SIZE = 1
-IMG_SIZE = 640  # or 480 for faster processing
-DRAW_EVERY_N_FRAMES = 3  # Increase to 3 or 4 for higher FPS
-INFERENCE_EVERY = 3  # chạy model.predict mỗi N frames (giảm inference)
-# Thêm cấu hình sau phần CONFIG
-CONF_THRESHOLD = 0.5     # Lọc bớt detection có độ tin cậy thấp
+        cfg = self.exercise_registry[self.exercise]
+        self.counter_func = cfg["counter_func"]
+        self.form_func = cfg["form_func"]
+        self.state = cfg["state"].copy()
 
-# -----------------------------
-# 🚀 Khởi tạo model (với GPU nếu có)
-# -----------------------------
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-print(f"▶️ Device: {device}")
+        # --- Variables cho Logic Âm Thanh ---
+        self.last_counter = 0
+        self.override_speech_until = 0.0
+        self.override_tone = None
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-# Debug CUDA status
-print("\n=== 🔍 GPU/CUDA Status ===")
-print(f"CUDA available: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"Current device: {torch.cuda.current_device()}")
-    print(f"Device name: {torch.cuda.get_device_name()}")
-    print(f"Device memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
-else:
-    print("⚠️ CUDA không khả dụng - model đang chạy trên CPU")
-print("=====================\n")
+        # === LOG DEVICE INFO ===
+        print(f"\n{'=' * 40}")
+        print(f"🚀 AI Fitness Tracker Initialized")
+        print(f"► Device    : {self.device.upper()}")
+        print(f"► Exercise  : {self.exercise.upper()}")
+        print(f"{'=' * 40}\n")
 
-# Tối ưu thêm cho CUDA
-if device.startswith("cuda"):
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cudnn.deterministic = False
-    # allow_tf32 attributes may not exist on some torch versions; guard with try
-    try:
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-    except Exception:
-        pass
-
-# Modify model initialization
-model = YOLO("yolo11n-pose.pt")
-model.conf = CONF_THRESHOLD
-try:
-    model.to(device)
-except Exception:
-    # some ultralytics versions auto-handle device; ignore if .to() fails
-    pass
-
-cap = cv2.VideoCapture(VIDEO_PATH)
-
-if not cap.isOpened():
-    print("❌ Không thể mở video hoặc webcam:", VIDEO_PATH)
-    exit()
-print("▶️ Bắt đầu. Nhấn 'q' để thoát.")
-
-# -----------------------------
-# 🧩 Đăng ký bài tập
-# -----------------------------
-exercise_registry = {
-    "squat": {
-        "counter_func": count_squat,
-        "form_func": evaluate_squat,
-        "state": {"stage": "up", "counter": 0, "prev_angle": 160, "direction": "up"},
-    },
-    "pushup": {
-        "counter_func": count_pushup,
-        "form_func": evaluate_pushup,
-        "state": {"stage": "up", "counter": 0, "prev_angle": 160, "direction": "up"},
-    },
-    "plank": {
-        "counter_func": count_plank,
-        "form_func": evaluate_plank,
-        "state": {"good_time": 0, "bad_time": 0, "is_good": False},
-    },
-    "situp": {
-        "counter_func": count_situp,
-        "form_func": evaluate_situp,
-        "state": {"stage": "down", "counter": 0, "prev_angle": 140, "direction": "down"},
-    },
-    # Thêm bài tập mới ở đây:
-    # "situp": {"counter_func": count_situp,
-    #            "form_func": evaluate_situp,
-    #            "state": {...}},
-}
-
-if EXERCISE not in exercise_registry:
-    raise ValueError(f"❌ Bài tập '{EXERCISE}' chưa được đăng ký trong exercise_registry!")
-
-counter_func = exercise_registry[EXERCISE]["counter_func"]
-form_func = exercise_registry[EXERCISE]["form_func"]
-state = exercise_registry[EXERCISE]["state"]
-
-
-# --- Voice player init ---
-# Build the path dynamically relative to the current script
-BASE_DIR = os.path.dirname(__file__)  # folder containing this file (e.g. src/)
-VOICES_DIR = os.path.join(BASE_DIR, "data", "voices")
-
-# phát welcome.mp3 → đợi 2s → lần đầu theo tone là 5s, sau đó giữ nguyên tone thì 4s
-voice_player.init(VOICES_DIR, base_interval_first=6.0, base_interval_same=5.0)
-
-# --- Voice player init (periodic-only) ---
-
-# Khởi tạo periodic player: mỗi 3 giây đọc tone hiện tại và phát
-voice_player.init(VOICES_DIR, base_interval_first=10.0, base_interval_same=10.0)
-# ------------------------------------------------
-
-
-
-# -----------------------------
-# 🔁 Vòng lặp chính
-# -----------------------------
-prev_time = time.time()
-frame_idx = 0
-last_annotated = None     # cache frame đã vẽ skeleton/annotation
-last_results = None       # cache kết quả model (ultralytics 'result' object)
-last_kps = None           # cache keypoints list để reuse cho rep counter
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        print("🎬 Hết video hoặc lỗi đọc frame.")
-        break
-    # Resize frame for consistent input size (trade-off: smaller -> faster)
-    frame_resized = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
-
-    # --- Chỉ chạy inference mỗi INFERENCE_EVERY frames ---
-    do_inference = (frame_idx % INFERENCE_EVERY == 0)
-
-    if do_inference:
+        self.model = YOLO("yolo11n-pose.pt")
+        self.model.conf = conf
         try:
-            results = model.predict(frame_resized,
-                                    verbose=False,
-                                    conf=CONF_THRESHOLD,
-                                    device=device,
-                                    batch=BATCH_SIZE)
-            # results returned as list-like; lấy phần tử đầu
-            res = results[0] if results and len(results) > 0 else None
-            last_results = res
-        except Exception as e:
-            # Trong trường hợp predict lỗi, giữ last_results (nếu có)
-            print("⚠️ Lỗi khi predict:", e)
-            res = last_results
-    else:
-        # reuse last inference result
-        res = last_results
+            self.model.to(self.device)
+        except:
+            pass
 
-    # -----------------------------
-    # Chỉ vẽ annotation mỗi DRAW_EVERY_N_FRAMES; reuse ảnh đã vẽ nếu có
-    # -----------------------------
-    if frame_idx % DRAW_EVERY_N_FRAMES == 0 and res is not None:
         try:
-            annotated = res.plot()  # ultralytics result.plot()
-            last_annotated = annotated
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.model.fuse()
+            # Warmup
+            import numpy as _np
+            dummy = _np.zeros((self.img_size, self.img_size, 3), dtype=_np.uint8)
+            with torch.inference_mode():
+                _ = self.model.predict(dummy, verbose=False, imgsz=self.img_size, max_det=1, conf=self.conf)
         except Exception:
-            # nếu res.plot() fail, fallback to drawing on resized frame
-            annotated = frame_resized.copy()
-            last_annotated = annotated
-    else:
-        # reuse last annotated image nếu có, else dùng resized frame
-        annotated = last_annotated if last_annotated is not None else frame_resized.copy()
+            pass
 
-    counter = 0
-    stage = "up"
-    angle = 0
-    feedback = "..."
+        voice_player.init(voices_dir, base_interval_first=10.0, base_interval_same=8.0)
 
-    # Nếu có keypoints → xử lý (dùng last_results nếu không predict frame này)
-    if res is not None and getattr(res, "keypoints", None) is not None:
-        try:
-            # res.keypoints.xy có thể trả về mảng Nx( ... ), lấy bộ đầu tiên nếu có nhiều người
-            kps_arr = res.keypoints.xy
-            if kps_arr is not None and len(kps_arr) > 0:
-                kps = kps_arr[0].tolist()
-                last_kps = kps
+        # --- Internal states ---
+        self.frame_idx = 0
+        self.last_results = None
+        self.last_annotated = None
+        self.last_kps = None
+        self.prev_time = time.time()
+
+    # [SỬA ĐỔI QUAN TRỌNG]: Thêm tham số timestamp=None
+    def process_frame(self, frame, timestamp=None):
+        if frame is None:
+            voice_player.set_active(False)
+            return None
+
+        frame_resized = cv2.resize(frame, (self.img_size, self.img_size), interpolation=cv2.INTER_AREA)
+
+        # 1. Inference
+        do_inference = (self.frame_idx % self.inference_every == 0)
+        if do_inference:
+            try:
+                with torch.inference_mode():
+                    results = self.model.predict(
+                        frame_resized,
+                        verbose=False,
+                        conf=self.conf,
+                        device=self.device,
+                        imgsz=self.img_size,
+                        max_det=1,
+                    )
+                res = results[0] if results else None
+                self.last_results = res
+            except Exception:
+                res = self.last_results
+        else:
+            res = self.last_results
+
+        # 2. Draw
+        if self.frame_idx % self.draw_every == 0 and res is not None:
+            try:
+                annotated = res.plot()
+                self.last_annotated = annotated
+            except:
+                annotated = frame_resized.copy()
+                self.last_annotated = annotated
+        else:
+            annotated = (
+                self.last_annotated if self.last_annotated is not None else frame_resized.copy()
+            )
+
+        # 3. Get Keypoints
+        kps = self.last_kps
+        has_kps_detected = False
+
+        if res is not None and getattr(res, "keypoints", None) and res.boxes.conf is not None:
+            if len(res.boxes.conf) > 0:
+                max_idx = torch.argmax(res.boxes.conf).item()
+                if res.boxes.conf[max_idx] > self.conf:
+                    arr = getattr(res.keypoints, "xy", None)
+                    if arr is not None and len(arr) > 0 and max_idx < len(arr):
+                        kps = arr[max_idx].cpu().numpy()[:, :2].tolist()
+                        self.last_kps = kps
+                        has_kps_detected = True
+
+        # --- CORE LOGIC ---
+        counter = self.state.get("counter", 0)
+        stage = self.state.get("stage", "up")
+        feedback = "..."
+        feedback_color = (255, 255, 255)
+        current_angle = 180.0
+        calculated_tone = "neutral"
+
+        if kps is not None:
+            try:
+                # [SỬA ĐỔI QUAN TRỌNG]: Truyền timestamp vào hàm counter
+                # Nếu timestamp là None (webcam), rep_counter sẽ tự dùng time.time()
+                result = self.counter_func(kps, self.state, current_timestamp=timestamp)
+
+                if isinstance(result, (tuple, list)):
+                    counter = result[0]
+                    if len(result) >= 3:
+                        current_angle = result[2]
+                else:
+                    counter = result
+                    current_angle = self.state.get('prev_angle', 180.0)
+
+                stage = self.state.get('stage', stage)
+
+                # Form Eval
+                eval_res = self.form_func(kps, annotated, stage, counter)
+                if isinstance(eval_res, (tuple, list)) and len(eval_res) >= 3:
+                    if len(eval_res) == 4:
+                        _, feedback, calculated_tone, _ = eval_res
+                    else:
+                        _, feedback, calculated_tone = eval_res[:3]
+                else:
+                    feedback, calculated_tone = "Analyzing...", "neutral"
+
+            except Exception as e:
+                print(f"Logic Error: {e}")
+                pass
+
+        # ... (Phần Logic Âm thanh giữ nguyên không đổi) ...
+        final_tone = calculated_tone
+        final_active = False
+
+        # Logic âm thanh plank/squat/etc giữ nguyên...
+        if counter > self.last_counter:
+            self.override_speech_until = time.time() + 2.5
+            self.override_tone = "positive"
+            self.last_counter = counter
+
+        if time.time() < self.override_speech_until:
+            final_active = True
+            final_tone = self.override_tone
+        else:
+            is_motion_active = False
+            if has_kps_detected:
+                if self.exercise == "plank":
+                    if self.state.get('is_good', False) or self.state.get('elapsed', 0.0) > 1.0:
+                        is_motion_active = True
+                # Các bài tập khác giữ nguyên logic
+                elif self.exercise in ["squat", "pushup", "situp"]:
+                    # Logic cũ
+                    if self.exercise == "squat" and current_angle < 165:
+                        is_motion_active = True
+                    elif self.exercise == "pushup" and current_angle < 160:
+                        is_motion_active = True
+                    elif self.exercise == "situp" and current_angle < 135:
+                        is_motion_active = True
+
+            current_active_frames = self.state.get("active_frames", 0)
+            if is_motion_active:
+                current_active_frames = min(current_active_frames + 1, 30)
             else:
-                # không có keypoints trong kết quả hiện tại → fallback dùng last_kps
-                kps = last_kps
-        except Exception:
-            kps = last_kps
-    else:
-        kps = last_kps
+                current_active_frames = max(current_active_frames - 1, 0)
+            self.state["active_frames"] = current_active_frames
 
-    if kps is not None:
-        # Gọi hàm đếm và đánh giá form tương ứng bài tập
-        try:
-            counter, stage, angle = counter_func(kps, state)
-            form_score, feedback, tone = form_func(kps, annotated, stage, counter)
-            # Cập nhật voice player với tone hiện tại (tone mapping do bạn design)
-            voice_player.set_tone(tone)
-            form_color = (0, 255, 0) if tone == "good" else (0, 0, 255)
-        except Exception as e:
-            # in ra lỗi xử lý rep/form nhưng không crash vòng lặp
-            print("⚠️ Lỗi xử lý rep/form:", e)
-            form_color = (255, 255, 255)
-            feedback = "Lỗi xử lý"
-    else:
-        form_color = (255, 255, 255)
-        feedback = "Không phát hiện người"
+            if current_active_frames >= 5:
+                final_active = True
+            if final_active and final_tone == "neutral" and self.exercise != "plank":
+                final_active = False
+            if final_tone == "negative" and current_active_frames >= 5:
+                final_active = True
 
-    # -----------------------------
-    # 🧮 Tính FPS
-    # -----------------------------
-    fps, prev_time = compute_fps(prev_time)
+        voice_player.set_tone(final_tone)
+        voice_player.set_active(final_active)
 
-    # -----------------------------
-    # 🖼️ Overlay text
-    # -----------------------------
-    # For plank display, use elapsed time (counter represents elapsed now)
-    if EXERCISE == "plank":
-        elapsed = state.get("elapsed", float(counter) if counter is not None else 0.0)
+        if final_tone == "positive":
+            feedback_color = (0, 255, 0)
+        elif final_tone == "neutral":
+            feedback_color = (0, 255, 255)
+        elif final_tone == "negative":
+            feedback_color = (0, 0, 255)
+
+        # Visuals
+        fps, self.prev_time = compute_fps(self.prev_time)
+        display_counter = self.state.get("elapsed", self.state.get("counter", counter))
+        display_stage = self.state.get("stage", stage)
+
+        if self.exercise == "plank":
+            val_str = f"{display_counter:.1f}s"
+            lbl_str = "Time"
+        else:
+            val_str = f"{int(display_counter)}"
+            lbl_str = "Count"
+
         lines = [
-            (f"Thời gian giữ: {elapsed:.1f}s", (255, 215, 0)),
-            (f"Tư thế: {'Chuẩn' if state.get('is_good') else 'Chưa đúng'}", (255, 255, 255)),
-            (f"Góc: {int(angle)}°", (144, 238, 144)),
-            (f"Đánh giá: {feedback}", form_color),
-            (f"FPS: {fps:.1f}", (200, 200, 200)),
-        ]
-    else:
-        lines = [
-            (f"Số lần: {counter}", (255, 215, 0)),
-            (f"Trạng thái: {stage}", (255, 255, 255)),
-            (f"Góc: {int(angle)}°", (144, 238, 144)),
-            (f"Đánh giá: {feedback}", form_color),
+            (f"{lbl_str}: {val_str}", (255, 215, 0)),
+            (f"Stage: {display_stage}", (255, 255, 255)),
+            (f"Eval: {feedback}", feedback_color),
             (f"FPS: {fps:.1f}", (200, 200, 200)),
         ]
 
-    annotated = draw_text_pil(annotated, lines, font_path=FONT_PATH, font_scale=26, pos=(20, 20))
+        current_font_path = self.font_path if os.path.exists(self.font_path) else None
+        annotated = draw_text_pil(annotated, lines, font_path=current_font_path, font_scale=26, pos=(20, 20))
 
-    # -----------------------------
-    # 🖥️ Hiển thị video auto-scale
-    # -----------------------------
-    if frame_idx == 0:
-        setup_window("AI Fitness Tracker", annotated, max_height=720)
-
-    cv2.imshow("AI Fitness Tracker", annotated)
-    frame_idx += 1
-
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
-voice_player.stop()
+        self.frame_idx += 1
+        return annotated

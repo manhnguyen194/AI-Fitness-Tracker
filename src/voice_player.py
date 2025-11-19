@@ -1,314 +1,301 @@
 # src/voice_player.py
 """
-AI-Fitness-Tracker Voice Player (MP3-only, queued, no overlap, tone-silence window)
+AI-Fitness-Tracker Voice Player (Pygame Backend)
 
-- Single playback worker (queue) -> KHÔNG chồng tiếng:
-  Nếu đang phát mà tone đổi, edge clip sẽ vào hàng đợi, phát SAU khi clip hiện tại kết thúc.
-- Plays 'welcome.mp3' 1 lần, đợi 2s, rồi vào logic theo tone.
-- Periodic:
-    * Lần đầu theo tone: base_interval_first (mặc định 6s).
-    * Nếu giữ nguyên tone: base_interval_same (mặc định 5s).
-    * Thứ tự mỗi tone: <tone>_1.mp3 -> _2.mp3 -> _3.mp3 -> _1...
-- Edge trigger:
-    * Khi tone đổi (qua debounce), enqueue ngay <tone>_1.
-    * Sau đó block >= edge_cooldown_sec (mặc định 2.5s) để tránh dày.
-- "Silent window" sau khi đổi tone:
-    * Nếu đổi tone rồi NHẢY tiếp trong <= no_play_if_recent_change_sec (mặc định 2.0s)
-      thì KHÔNG phát (bỏ qua edge/periodic trong khoảng này).
-- MP3 only. Nếu thiếu file -> print("Audio not found").
+- Backend: Dùng 'pygame.mixer' thay vì 'playsound' để sửa lỗi MCI/Path trên Windows.
+- Logic:
+  + Single worker queue (không chồng tiếng).
+  + Welcome message -> Wait -> Periodic loop.
+  + Debounce tone change (tránh đổi giọng liên tục khi AI nhận diện chập chờn).
+  + Silent window (không phát ngay sau khi vừa đổi giọng để tránh spam).
+  + Thêm cờ `_is_active` để tắt âm thanh định kỳ khi không phát hiện người/bài tập.
 """
 
 import os
-import sys
 import time
 import threading
 import queue
-import tempfile
-import shutil
-import uuid
-import atexit
-import ctypes
 
-# --- playsound backend (blocking) ---
+# --- Pygame backend init ---
 try:
-    from playsound import playsound  # pip install playsound==1.3.0
-    _HAVE_PLAYSOUND = True
-except Exception:
-    _HAVE_PLAYSOUND = False
+    # Tắt thông báo chào của pygame
+    os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
+    import pygame
 
-VALID_TONES = ("positive", "neutral", "negative")
+    _HAVE_PYGAME = True
+except ImportError:
+    _HAVE_PYGAME = False
+    print("⚠️ Lỗi: Chưa cài thư viện pygame. Hãy chạy: pip install pygame")
 
-# ---------- Safe-path helpers (fix MCI issues on Windows) ----------
+VALID_TONES = ("positive", "neutral", "negative", "good", "bad")
+
+
+# ---------- Helpers ----------
 def _mp3_exists(path: str) -> bool:
     return bool(path) and path.lower().endswith(".mp3") and os.path.exists(path)
 
-# Windows 8.3 short path (ASCII-ish, no spaces)
-def _win_short_path(path: str) -> str | None:
-    try:
-        GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW
-        GetShortPathNameW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
-        GetShortPathNameW.restype = ctypes.c_uint
-        buf = ctypes.create_unicode_buffer(260)
-        res = GetShortPathNameW(path, buf, 260)
-        return buf.value if res > 0 else None
-    except Exception:
-        return None
-
-_TEMP_DIR = os.path.join(tempfile.gettempdir(), "aft_voice_tmp")
-os.makedirs(_TEMP_DIR, exist_ok=True)
-def _cleanup_tmp_dir():
-    try:
-        shutil.rmtree(_TEMP_DIR, ignore_errors=True)
-    except Exception:
-        pass
-atexit.register(_cleanup_tmp_dir)
-
-def _playsound_blocking_safe(path: str):
-    """
-    Gọi playsound blocking theo cách an toàn trên Windows:
-    - Thử 8.3 short path; nếu fail -> copy sang temp ASCII/no-space rồi playsound.
-    - Non-Windows: playsound(path) trực tiếp.
-    """
-    if not _HAVE_PLAYSOUND:
-        raise RuntimeError("playsound is not available")
-
-    if not sys.platform.startswith("win"):
-        playsound(path)
-        return
-
-    sp = _win_short_path(path)
-    if sp and os.path.exists(sp):
-        try:
-            playsound(sp)
-            return
-        except Exception:
-            pass
-
-    fname = f"voice_{uuid.uuid4().hex}.mp3"
-    safe_path = os.path.join(_TEMP_DIR, fname)
-    shutil.copyfile(path, safe_path)
-    try:
-        playsound(safe_path)
-    finally:
-        try: os.remove(safe_path)
-        except Exception: pass
 
 # ---------- VoicePlayer ----------
 class VoicePlayer:
     def __init__(
-        self,
-        voices_dir: str,
-        base_interval_first: float = 6.0,
-        base_interval_same: float  = 5.0,
-        tone_change_debounce_ms: int = 1100,  # yêu cầu tone mới ổn định tối thiểu 1.1s
-        require_stable_frames: int = 8,       # và >= 8 frames liên tiếp
-        edge_cooldown_sec: float   = 2.5,     # sau edge, chờ >= 2.5s
-        no_play_if_recent_change_sec: float = 2.0,  # vùng yên lặng 2s sau khi đổi tone
+            self,
+            voices_dir: str,
+            base_interval_first: float = 6.0,
+            base_interval_same: float = 5.0,
+            tone_change_debounce_ms: int = 1100,
+            require_stable_frames: int = 8,
+            edge_cooldown_sec: float = 3.0,
+            no_play_if_recent_change_sec: float = 2.5,
     ):
         self.voices_dir = voices_dir
         self.base_interval_first = float(base_interval_first)
-        self.base_interval_same  = float(base_interval_same)
+        self.base_interval_same = float(base_interval_same)
+
+        # Init mixer nếu chưa init
+        if _HAVE_PYGAME:
+            try:
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init()
+            except Exception as e:
+                print(f"⚠️ Không thể khởi tạo âm thanh: {e}")
 
         # Tone state
         self.current_tone: str = "neutral"
         self._last_periodic_tone: str | None = None
-        self._cycle = {t: 1 for t in VALID_TONES}  # next index 1..3 per tone
+        self._cycle = {t: 1 for t in VALID_TONES}  # Index xoay vòng 1->2->3
 
-        # Debounce / cooldown / silent window
+        # Debounce / cooldown
         self.tone_change_debounce_ms = int(tone_change_debounce_ms)
-        self.require_stable_frames   = int(require_stable_frames)
-        self._edge_cooldown_sec      = float(edge_cooldown_sec)
+        self.require_stable_frames = int(require_stable_frames)
+        self._edge_cooldown_sec = float(edge_cooldown_sec)
         self.no_play_if_recent_change_sec = float(no_play_if_recent_change_sec)
 
-        # Debounce pending
+        # Debounce pending var
         self._pending_tone: str | None = None
         self._pending_since_ts: float | None = None
         self._pending_count: int = 0
 
+        # Trạng thái Hoạt động MỚI
+        self._is_active: bool = False
+
         # Scheduling
         self._next_play_ts: float = float("inf")
-        self._last_tone_change_ts: float = 0.0  # mốc khi CHẤP NHẬN đổi tone
+        self._last_tone_change_ts: float = 0.0
 
         # Threading
         self._stop_flag = threading.Event()
         self._lock = threading.Lock()
 
-        # Playback worker (single)
+        # Playback Queue
         self._play_queue: "queue.Queue[tuple[str,str]]" = queue.Queue()
         self._play_thread: threading.Thread | None = None
-        self._is_playing: bool = False
-
-        # Welcome flag
-        self._did_welcome = False
 
     # ---------- Public ----------
     def start(self):
         if self._play_thread and self._play_thread.is_alive():
             return
         self._stop_flag.clear()
-        # worker trước
+
+        # Worker thread (phát âm thanh từ hàng đợi)
         self._play_thread = threading.Thread(target=self._play_worker, daemon=True)
         self._play_thread.start()
-        # main loop sau
-        threading.Thread(target=self._main_loop, daemon=True).start()
+
+        # Scheduler thread (tính toán thời điểm phát tiếp theo)
+        threading.Thread(target=self._scheduler_loop, daemon=True).start()
 
     def stop(self):
         self._stop_flag.set()
-        try: self._play_queue.put_nowait(("", "stop"))
-        except Exception: pass
+        try:
+            # Gửi lệnh dừng tới hàng đợi
+            self._play_queue.put_nowait(("", "stop"))
+        except Exception:
+            pass
+
+        # Dừng nhạc ngay lập tức
+        if _HAVE_PYGAME and pygame.mixer.get_init():
+            pygame.mixer.music.stop()
+
         if self._play_thread:
             self._play_thread.join(timeout=1.0)
 
+    def set_active(self, is_active: bool):
+        """Cập nhật cờ hoạt động. Gọi khi KPS được phát hiện."""
+        with self._lock:
+            self._is_active = is_active
+            # Nếu vừa chuyển sang trạng thái inactive, reset thời gian chờ
+            if not is_active:
+                self._next_play_ts = time.time() + 1.0
+
     def set_tone(self, tone: str):
         """
-        Debounce đổi tone:
-          - Chỉ nhận đổi nếu tone mới ổn định >= tone_change_debounce_ms
-            VÀ liên tiếp >= require_stable_frames.
-          - Khi nhận, enqueue <tone>_1 (edge-change) TRỪ KHI đang trong silent window.
-          - Sau đó block >= edge_cooldown_sec.
+        Nhận tone từ AI model -> Debounce -> Quyết định có đổi giọng hay không.
         """
         t = (tone or "").lower()
         if t not in VALID_TONES:
-            return
+            # Xử lý trường hợp `tone` được gán là 'good'/'bad' nhưng thư mục chưa có file
+            # Ví dụ: đổi 'good'/'bad' thành 'positive'/'negative' để dùng file chung
+            if t == 'good': t = 'positive'
+            if t == 'bad': t = 'negative'
+            if t not in VALID_TONES:
+                return
 
         now = time.time()
         with self._lock:
+            # Nếu tone giống hiện tại -> reset pending
             if t == self.current_tone:
-                # giữ nguyên tone -> xoá pending
                 self._pending_tone = None
                 self._pending_since_ts = None
                 self._pending_count = 0
                 return
 
+            # Nếu bắt đầu đổi sang tone mới
             if self._pending_tone != t:
-                # bắt đầu pending mới
                 self._pending_tone = t
                 self._pending_since_ts = now
                 self._pending_count = 1
                 return
 
-            # vẫn pending cùng một t
+            # Đang pending tone t
             self._pending_count += 1
             elapsed_ms = (now - (self._pending_since_ts or now)) * 1000.0
-            if (elapsed_ms < self.tone_change_debounce_ms) or (self._pending_count < self.require_stable_frames):
-                return  # chưa đủ điều kiện
 
-            # === CHẤP NHẬN đổi tone ===
+            # Kiểm tra đủ điều kiện debounce chưa
+            if (elapsed_ms < self.tone_change_debounce_ms) or (self._pending_count < self.require_stable_frames):
+                return
+
+            # === CHẤP NHẬN ĐỔI TONE ===
             new_tone = t
             self.current_tone = new_tone
             self._pending_tone = None
             self._pending_since_ts = None
             self._pending_count = 0
 
-            # reset thứ tự về _1
+            # Reset cycle
             self._cycle[new_tone] = 1
 
-            # Silent window: nếu vừa đổi tone gần đây (<= window) -> KHÔNG phát edge
+            # Xử lý Edge Trigger (Phát ngay khi đổi, trừ khi vừa đổi xong)
             if (now - self._last_tone_change_ts) >= self.no_play_if_recent_change_sec:
                 path = self._tone_file(new_tone, 1)
                 self._enqueue(path, reason="edge-change")
-                # lần sau của tone này sẽ là _2
-                self._cycle[new_tone] = 2
+                self._cycle[new_tone] = 2  # Lần tới sẽ là câu 2
             else:
-                # bỏ qua edge (giữ _1 để kỳ sau phát)
+                # Trong vùng im lặng -> bỏ qua edge, giữ index 1
                 self._cycle[new_tone] = 1
 
-            # cập nhật mốc đổi tone & block periodic
+            # Cập nhật thời gian
             self._last_tone_change_ts = now
             self._next_play_ts = max(self._next_play_ts, now + self._edge_cooldown_sec)
             self._last_periodic_tone = new_tone
 
-    # ---------- Internal ----------
+    # ---------- Internal Workers ----------
     def _play_worker(self):
-        """Single playback worker: playsound() BLOCKING -> không chồng tiếng."""
+        """
+        Lấy file từ hàng đợi và phát bằng Pygame (Blocking logic)
+        """
         while not self._stop_flag.is_set():
             try:
+                # Đặt timeout ngắn để thread có thể thoát khi cờ dừng được set
                 path, reason = self._play_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
+
             if not path or reason == "stop":
                 continue
 
-            if not _mp3_exists(path) or not _HAVE_PLAYSOUND:
-                print("Audio not found")
+            if not _HAVE_PYGAME:
                 continue
 
-            self._is_playing = True
+            if not _mp3_exists(path):
+                # print(f"[VoicePlayer] ❌ File not found: {path}")
+                continue
+
+            # Phát nhạc
             try:
-                _playsound_blocking_safe(path)
-                print(f"[VoicePlayer] play {os.path.splitext(os.path.basename(path))[0]} ({reason})")
-            except Exception:
-                print("Audio not found")
-            finally:
-                self._is_playing = False
+                # print(f"[VoicePlayer] 🔊 Play: {os.path.basename(path)} ({reason})")
+                pygame.mixer.music.load(path)
+                pygame.mixer.music.play()
+
+                # Chờ nhạc chạy xong (Blocking giả lập)
+                while pygame.mixer.music.get_busy() and not self._stop_flag.is_set():
+                    time.sleep(0.1)
+
+            except Exception as e:
+                print(f"[VoicePlayer] Error playing: {e}")
 
     def _enqueue(self, path: str, reason: str):
-        if not _mp3_exists(path):
-            print("Audio not found")
-            return
-        try:
-            self._play_queue.put_nowait((path, reason))
-        except Exception:
-            pass
+        if _mp3_exists(path):
+            try:
+                self._play_queue.put_nowait((path, reason))
+            except Exception:
+                pass
 
-    def _main_loop(self):
+    def _scheduler_loop(self):
         """
-        1) Welcome nếu có, đợi 2s.
-        2) Hẹn lần periodic đầu: base_interval_first.
-        3) Nếu giữ nguyên tone từ lần periodic trước -> dùng base_interval_same; ngược lại base_interval_first.
-        4) Silent window: nếu vừa đổi tone trong cửa sổ -> SKIP periodic.
+        Điều phối việc phát định kỳ (Periodic)
         """
-        # Step 1: welcome
+        # 1. Phát Welcome
         welcome_path = os.path.join(self.voices_dir, "welcome.mp3")
         if _mp3_exists(welcome_path):
             self._enqueue(welcome_path, reason="welcome")
-        else:
-            print("Audio not found")
-        # đợi 2s (không block worker)
+
+        # Đợi 2s sau khi start
         start_ts = time.time()
         while not self._stop_flag.is_set() and (time.time() - start_ts) < 2.0:
             time.sleep(0.05)
 
-        # First periodic
+        # Hẹn giờ lần đầu
         with self._lock:
             self._next_play_ts = time.time() + self.base_interval_first
             self._last_periodic_tone = None
 
-        # Main loop
+        # 2. Vòng lặp chính
         while not self._stop_flag.is_set():
             now = time.time()
             with self._lock:
+
+                # 💡 LOGIC SỬA LỖI: CHỈ PHÁT ĐỊNH KỲ NẾU self._is_active LÀ TRUE
+                if not self._is_active:
+                    # Kiểm tra lại sau khoảng thời gian ngắn
+                    self._next_play_ts = now + 1.0
+                    time.sleep(0.05)
+                    continue
+
                 if now >= self._next_play_ts:
-                    # Silent window sau lần đổi tone gần nhất -> bỏ periodic
+                    # Nếu vừa đổi tone gần đây -> Skip periodic này
                     if (now - self._last_tone_change_ts) < self.no_play_if_recent_change_sec:
+                        # Tính lại thời gian chờ
                         interval = self.base_interval_same if (self._last_periodic_tone == self.current_tone) \
-                                   else self.base_interval_first
+                            else self.base_interval_first
                         self._next_play_ts = max(now + interval, now + self._edge_cooldown_sec)
                     else:
+                        # Phát định kỳ
                         tone = self.current_tone
-                        idx = self._cycle[tone]
+                        idx = self._cycle.get(tone, 1)  # Đảm bảo key tồn tại
                         path = self._tone_file(tone, idx)
                         self._enqueue(path, reason="periodic")
 
-                        # 1->2->3->1
+                        # Tăng index (1->2->3->1)
                         self._cycle[tone] = 1 if idx >= 3 else (idx + 1)
 
-                        # chọn interval theo việc giữ tone
+                        # Tính thời gian chờ lần tới
                         interval = self.base_interval_same if (self._last_periodic_tone == tone) \
-                                   else self.base_interval_first
+                            else self.base_interval_first
                         self._last_periodic_tone = tone
                         self._next_play_ts = max(now + interval, now + self._edge_cooldown_sec)
+
             time.sleep(0.05)
 
     def _tone_file(self, tone: str, index: int) -> str:
         return os.path.join(self.voices_dir, f"{tone}_{index}.mp3")
 
-# -------- Module-level API --------
+
+# -------- Singleton API --------
 _player: VoicePlayer | None = None
+
 
 def init(voices_dir: str,
          base_interval_first: float = 6.0,
-         base_interval_same: float  = 5.0):
+         base_interval_same: float = 5.0):
     global _player
     if _player:
         _player.stop()
@@ -320,9 +307,17 @@ def init(voices_dir: str,
     _player.start()
     return _player
 
+
 def set_tone(tone: str):
     if _player:
         _player.set_tone(tone)
+
+
+def set_active(is_active: bool):
+    """API mới: Kích hoạt/Vô hiệu hóa phản hồi định kỳ."""
+    if _player:
+        _player.set_active(is_active)
+
 
 def stop():
     global _player
