@@ -41,11 +41,6 @@ AI-Fitness-Tracker/
 ├─ fonts/                         # Fonts for overlay text
 │   └─ Roboto.ttf
 │
-├─ assets/                        # Optional: screenshots, diagrams, readme images
-│   └─ images/
-│       ├─ webcam_demo.png
-│       └─ video_preview.png
-│
 ├─ requirements.txt
 │
 └─ README.md
@@ -60,19 +55,23 @@ AI-Fitness-Tracker/
 git clone https://github.com/manhnguyen194/AI-Fitness-Tracker.git
 cd AI-Fitness-Tracker
 ```
-2. **Verify Python version**
-- Make sure you are using **Python 3.10**:
-```bash
-python --version
-# or
-python3 --version
-```
 
-3**Install dependencies**
-- **Make sure your `pip` and `setuptools` are up-to-date:**
+2. **Install Miniconda**
+- Download Miniconda from the official website.
+- During installation, check the first two options:
+  - Add Miniconda to my PATH
+  - Register Miniconda as default Python
+3. **Open Conda PowerShell**
+- Open the Start Menu → search for “Conda PowerShell Prompt” → open it.
+4. **Create and activate the environment**
 ```bash
-python -m pip install --upgrade pip setuptools wheel
+conda create -n ai_fitness python=3.11
 ```
+- Press `y` when prompted.
+```bash
+conda activate ai_fitness
+```
+6. **Install dependencies**
 - **GPU (CUDA 12.1) recommended:**
 ```bash
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
@@ -93,13 +92,11 @@ print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU de
 ```
 
 ## Running the App
-1. **Pose Extractor + Webcam (OpenCV window)**
-```angular2html
-python src/pose_extractor.py
+**Navigate to the project directory**
+```bash
+cd path/to/AI-Fitness-Tracker
 ```
-- Press `q` to quit the webcam window.
-- Supports Squat, Push-up, Sit-up, and Plank (configure EXERCISE variable).
-2. **Gradio Web Interface**
+**Gradio Web Interface**
 ```angular2html
 python src/gradio_app_demo.py
 ```
