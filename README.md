@@ -35,8 +35,7 @@ AI-Fitness-Tracker/
 │   ├─ raw/                       # Sample videos
 │   └─ voices/                    # Voice feedback files
 │
-├─ models/                        # Trained weights
-│   └─ yolo11n-pose.pt            # Default model weights
+├─ yolo11n-pose.pt            # Default model weights
 │
 ├─ fonts/                         # Fonts for overlay text
 │   └─ Roboto.ttf
