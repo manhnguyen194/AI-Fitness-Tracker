@@ -112,5 +112,3 @@ python src/gradio_app_demo.py
 - **Voice feedback** is configurable via `data/voices/`
 - Recommended resolution for output: **1920x1080**
 - Close webcam window or press `q` to stop the thread safely
-
-## License
